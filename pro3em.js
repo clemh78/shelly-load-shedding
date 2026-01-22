@@ -71,14 +71,6 @@ let state = {
   forcedShedding: false
 };
 
-// Simulation statistics (only used if MODE_SIMULATION = true)
-let stats = {
-  cycles: 0,
-  sheddings: [0, 0, 0],
-  restorations: [0, 0, 0],
-  startTime: Date.now()
-};
-
 // ============================================================================
 // UTILITY FUNCTIONS
 // ============================================================================
@@ -90,13 +82,11 @@ function log(message) {
   }
 }
 
-function logSimulatedAction(action, phase) {
-  if (!CONFIG.MODE_SIMULATION) return;
-  
+function logAction(action, phase) {
   let phaseName = ["L1", "L2", "L3"][phase];
   let symbol = action === "off" ? "[OFF]" : "[ON]";
   
-  let msg = ">>> SIMULATED ACTION >>>\n" +
+  let msg = ">>> ACTION >>>\n" +
             "Relay " + phase + " (" + phaseName + ") -> " + action.toUpperCase() + "\n" +
             symbol + "\n" +
             ">>>>>>>>>>>>>>>>>>>>>>>";
@@ -105,28 +95,17 @@ function logSimulatedAction(action, phase) {
 }
 
 function sendCommand(relay, action) {
-  if (CONFIG.MODE_SIMULATION) {
-    // SIMULATION MODE: display action without executing
-    logSimulatedAction(action, relay);
+  logAction(action, relay);
 
-    // Update stats
-    if (action === "off") {
-      stats.sheddings[relay]++;
+  let url = "http://" + CONFIG.PRO3_IP + "/relay/" + relay + "?turn=" + action;
+  
+  Shelly.call("HTTP.GET", {url: url}, function(result, error_code, error_message) {
+    if (error_code !== 0) {
+      log("ERROR relay command " + relay + ": " + error_message);
     } else {
-      stats.restorations[relay]++;
+      log("Command sent: relay " + relay + " -> " + action);
     }
-  } else {
-    // PRODUCTION MODE: send real HTTP command
-    let url = "http://" + CONFIG.PRO3_IP + "/relay/" + relay + "?turn=" + action;
-    
-    Shelly.call("HTTP.GET", {url: url}, function(result, error_code, error_message) {
-      if (error_code !== 0) {
-        log("ERROR relay command " + relay + ": " + error_message);
-      } else {
-        log("Command sent: relay " + relay + " -> " + action);
-      }
     });
-  }
   
   // 📡 Publish relay state on MQTT
   let newState = (action === "on");
@@ -134,19 +113,13 @@ function sendCommand(relay, action) {
 }
 
 function sendHeartbeat() {
-  if (CONFIG.MODE_SIMULATION) {
-    // In simulation, just log
-    log("Simulated heartbeat");
-  } else {
-    // In production, send real heartbeat
     let url = "http://" + CONFIG.PRO3_IP + "/rpc/Shelly.SetVar?name=heartbeat&value=" + Date.now();
-    
+
     Shelly.call("HTTP.GET", {url: url}, function(result, error_code, error_message) {
-      if (error_code !== 0) {
+        if (error_code !== 0) {
         log("ERROR heartbeat: " + error_message);
-      }
+        }
     });
-  }
 }
 
 // ============================================================================
@@ -237,21 +210,6 @@ function publishRegularStates() {
   }
 }
 
-function displayStats() {
-  if (!CONFIG.MODE_SIMULATION) return;
-  
-  let duration = Math.floor((Date.now() - stats.startTime) / 1000);
-  
-  let msg = "\n=== SIMULATION STATS ===\n" +
-            "Duration: " + duration + "s | Cycles: " + stats.cycles + "\n" +
-            "L1: Shed=" + stats.sheddings[0] + " Restore=" + stats.restorations[0] + " | State: " + (state.relay[0] ? "ON" : "OFF") + "\n" +
-            "L2: Shed=" + stats.sheddings[1] + " Restore=" + stats.restorations[1] + " | State: " + (state.relay[1] ? "ON" : "OFF") + "\n" +
-            "L3: Shed=" + stats.sheddings[2] + " Restore=" + stats.restorations[2] + " | State: " + (state.relay[2] ? "ON" : "OFF") + "\n" +
-            "========================\n";
-  
-  print(msg);
-}
-
 // ============================================================================
 // SHEDDING LOGIC
 // ============================================================================
@@ -338,10 +296,6 @@ function checkPhase(phase, current, sheddingThreshold, restorationThreshold) {
 // ============================================================================
 
 function mainCycle() {
-  if (CONFIG.MODE_SIMULATION) {
-    stats.cycles++;
-  }
-
   // Check forced shedding variable
   Shelly.call("KVS.Get", {key: CONFIG.FORCE_SHEDDING_VAR}, function(result, error_code) {
     let forceShedding = false;
@@ -440,10 +394,6 @@ let startMsg = "Pro 3 IP: " + CONFIG.PRO3_IP + "\n" +
                "MQTT: " + (CONFIG.MQTT_ENABLED ? "Enabled (prefix: " + CONFIG.MQTT_TOPIC_PREFIX + ")" : "Disabled") + "\n\n" +
                "[OK] System operational!\n";
 
-if (CONFIG.MODE_SIMULATION) {
-  startMsg += "[INFO] Stats displayed every 60 seconds\n";
-}
-
 log(startMsg);
 
 // 📡 Publish initial states on MQTT
@@ -459,11 +409,8 @@ if (CONFIG.MQTT_ENABLED) {
 Timer.set(CONFIG.CYCLE_INTERVAL, true, mainCycle);
 
 // Heartbeat timer
-Timer.set(CONFIG.HEARTBEAT_INTERVAL, true, sendHeartbeat);
-
-// Stats timer (only in simulation mode)
-if (CONFIG.MODE_SIMULATION) {
-  Timer.set(60000, true, displayStats);
+if(!CONFIG.MODE_SIMULATION){
+ Timer.set(CONFIG.HEARTBEAT_INTERVAL, true, sendHeartbeat);
 }
 
 // Regular MQTT publication timer
