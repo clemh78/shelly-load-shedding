@@ -351,9 +351,6 @@ function handleEMStatusUpdate(msg) {
   let emData = msg.delta || msg.info;
   if (!emData) return;
 
-  // Log measurements
-  logPhaseMeasurements(emData);
-
   // Check all phases
   for (let phaseName in CONFIG.PHASES) {
     let rawCurrent = emData[CONFIG.PHASES[phaseName].emField];
@@ -361,6 +358,8 @@ function handleEMStatusUpdate(msg) {
     checkPhase(phaseName, current);
   }
 
+  // Log measurements
+  logPhaseMeasurements(emData);
   sendHeartbeat();
 }
 
