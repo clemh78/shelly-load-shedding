@@ -275,6 +275,7 @@ function checkPhase(phaseName, current) {
     // Start tracking overload time if not already tracking
     if (phaseState.overloadStartTime === null) {
       phaseState.overloadStartTime = now;
+      phaseState.status = "CRITICAL";
       log("OVERLOAD detected " + phaseName + ": " + current.toFixed(2) + "A > " + phaseConfig.sheddingThreshold + "A");
     }
 
@@ -296,7 +297,6 @@ function checkPhase(phaseName, current) {
       // Normal shedding after delay
       shouldShed = true;
       sheddingType = "normal";
-      phaseState.status = "CRITICAL";
       log("SHEDDING " + phaseName + " (overload for " + (overloadDuration/1000).toFixed(1) + "s)");
     }
 
