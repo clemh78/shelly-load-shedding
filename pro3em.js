@@ -305,6 +305,7 @@ function checkPhase(phaseName, current) {
       phaseState.relay = false;
       phaseState.lastShedding = now;
       phaseState.status = "SHED";
+      
       publishEvent(phaseName, sheddingType + "_shedding", current);
     }
   }
