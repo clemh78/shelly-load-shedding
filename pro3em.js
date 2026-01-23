@@ -42,8 +42,6 @@ let CONFIG = {
   // Timings
   SHEDDING_DELAY: 2000,         // 2s delay before shedding (circuit breaker tolerates peaks)
   RESTORATION_DELAY: 300000,    // 5min (300s) before restoring
-  RESTORATION_LOG_INTERVAL: 30, // Display restoration countdown every 30s
-  HEARTBEAT_INTERVAL: 5000,     // Heartbeat every 5s (production mode only)
 
   // Thresholds
   IMMEDIATE_SHEDDING_MULTIPLIER: 1.2,  // Immediate shedding at 120% of threshold
@@ -362,6 +360,8 @@ function handleEMStatusUpdate(msg) {
     let current = validateCurrent(rawCurrent !== undefined ? rawCurrent : 0, phaseName);
     checkPhase(phaseName, current);
   }
+
+  sendHeartbeat();
 }
 
 // ============================================================================
@@ -398,9 +398,6 @@ log(startMsg);
 
 // 📡 Publish initial states on MQTT
 if (CONFIG.MQTT_ENABLED) {
-  for (let phaseName in state.phases) {
-    publishRelayState(phaseName, state.phases[phaseName].relay);
-  }
   publishRegularStates();
   log("[MQTT] Initial states published");
   Timer.set(CONFIG.MQTT_PUBLISH_INTERVAL, true, publishRegularStates);
@@ -410,9 +407,3 @@ if (CONFIG.MQTT_ENABLED) {
 // Register status handler (triggered on EM updates)
 Shelly.addStatusHandler(handleEMStatusUpdate);
 log("Status handler registered for EM:0 updates");
-
-// Heartbeat timer (only in production mode)
-if (CONFIG.PRO3_IP) {
-  Timer.set(CONFIG.HEARTBEAT_INTERVAL, true, sendHeartbeat);
-  log("Heartbeat every " + (CONFIG.HEARTBEAT_INTERVAL/1000) + "s");
-}
