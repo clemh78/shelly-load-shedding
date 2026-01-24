@@ -1,12 +1,12 @@
 /******************************************************************************
  * INTELLIGENT THREE-PHASE LOAD SHEDDING - Pro 3EM
- * Version: 2.0-UNIFIED
+ * Version: 1.0
  * Author: Clément
  *
  * Installation: Shelly Pro 3EM → Settings → Scripts → Add Script
  * IP: 10.0.0.100
  *
- * ⚙️ SIMULATION MODE: Set MODE_SIMULATION to true for testing without hardware
+ * ⚙️ SIMULATION MODE: Leave PRO3_IP empty for testing without hardware
  ******************************************************************************/
 
 // ============================================================================
@@ -14,40 +14,45 @@
 // ============================================================================
 
 let CONFIG = {
-  // ⚠️ SIMULATION MODE TOGGLE
-  MODE_SIMULATION: true,      // true = simulation only, false = real commands
-  
-  // Network addresses
-  PRO3_IP: "10.0.0.101",
-  
-  // ⚡ OPTIMIZED THRESHOLDS FOR 30A THREE-PHASE ENEDIS CIRCUIT BREAKER
-  SHEDDING_THRESHOLD_L1: 28,    // 2A margin (uses 93% of rating)
-  SHEDDING_THRESHOLD_L2: 28,
-  SHEDDING_THRESHOLD_L3: 28,
-  
-  RESTORATION_THRESHOLD_L1: 26,    // 2A hysteresis
-  RESTORATION_THRESHOLD_L2: 26,
-  RESTORATION_THRESHOLD_L3: 26,
+  // Network addresses (leave empty for simulation mode)
+  PRO3_IP: "",                // Set to Pro 3EM IP (e.g., "10.0.0.101") or leave empty for simulation
+
+  // ⚡ PHASE CONFIGURATION
+  PHASES: {
+    L1: {
+      relayIndex: 0,
+      emField: "a_current",           // Field name in EM.GetStatus
+      sheddingThreshold: 28,          // 2A margin (uses 93% of rating)
+      restorationThreshold: 26        // 2A hysteresis
+    },
+    L2: {
+      relayIndex: 1,
+      emField: "b_current",
+      sheddingThreshold: 28,
+      restorationThreshold: 26
+    },
+    L3: {
+      relayIndex: 2,
+      emField: "c_current",
+      sheddingThreshold: 28,
+      restorationThreshold: 26
+    }
+  },
   
   // Timings
-  SHEDDING_DELAY: 2000,      // 2s (circuit breaker tolerates peaks well)
+  SHEDDING_DELAY: 2000,         // 2s delay before shedding (circuit breaker tolerates peaks)
   RESTORATION_DELAY: 300000,    // 5min (300s) before restoring
-  HEARTBEAT_INTERVAL: 5000,      // Heartbeat every 5s
-  CYCLE_INTERVAL: 2000,          // Check every 2s
-  
-  // Progressive shedding (priority order)
-  SHEDDING_ORDER: [2, 1, 0], // First L3, then L2, then L1
-  
+
+  // Thresholds
+  IMMEDIATE_SHEDDING_MULTIPLIER: 1.2,  // Immediate shedding at 120% of threshold
+
   // Debug mode
   DEBUG: true,
   
   // 📡 MQTT
   MQTT_ENABLED: true,         // Enable MQTT publishing
   MQTT_TOPIC_PREFIX: "load_shedding",  // MQTT topic prefix
-  MQTT_PUBLISH_INTERVAL: 30000,     // Publish states every 30s
-
-  // 🔒 FORCED SHEDDING (for summer mode, etc.)
-  FORCE_SHEDDING_VAR: "force_shedding"  // Shelly KVS variable name to force all relays off
+  MQTT_PUBLISH_INTERVAL: 30000      // Publish states every 30s
 };
 
 // ============================================================================
@@ -55,29 +60,27 @@ let CONFIG = {
 // ============================================================================
 
 let state = {
-  // Relay states (true = powered, false = shed)
-  relay: [true, true, true],
-
-  // Timestamp of last shedding per phase
-  lastShedding: [0, 0, 0],
-
-  // Consecutive exceedances counter
-  exceedances: [0, 0, 0],
-
-  // Overload in progress flag
-  overload: [false, false, false],
-
-  // Forced shedding mode (controlled by KVS variable)
-  forcedShedding: false
+  phases: {}                        // Initialized by init()
 };
 
-// Simulation statistics (only used if MODE_SIMULATION = true)
-let stats = {
-  cycles: 0,
-  sheddings: [0, 0, 0],
-  restorations: [0, 0, 0],
-  startTime: Date.now()
-};
+// ============================================================================
+// INITIALIZATION
+// ============================================================================
+
+function init() {
+  // Initialize phase states from CONFIG.PHASES
+  for (let phaseName in CONFIG.PHASES) {
+    state.phases[phaseName] = {
+      relay: true,                  // true = ON, false = OFF
+      status: "NORMAL",             // NORMAL | WARNING | CRITICAL | SHED
+      current: 0,                   // Last measured current (A)
+      overloadStartTime: null,      // Timestamp when overload started (null = no overload)
+      lastShedding: 0               // Timestamp of last shedding
+    };
+  }
+
+  log("Phases initialized: " + Object.keys(state.phases).join(", "));
+}
 
 // ============================================================================
 // UTILITY FUNCTIONS
@@ -85,68 +88,63 @@ let stats = {
 
 function log(message) {
   if (CONFIG.DEBUG) {
-    let prefix = CONFIG.MODE_SIMULATION ? "[PRO3EM-SIM]" : "[PRO3EM]";
-    print(prefix + " " + message);
+    print("[PRO3EM] " + message);
   }
 }
 
-function logSimulatedAction(action, phase) {
-  if (!CONFIG.MODE_SIMULATION) return;
-  
-  let phaseName = ["L1", "L2", "L3"][phase];
-  let symbol = action === "off" ? "[OFF]" : "[ON]";
-  
-  let msg = ">>> SIMULATED ACTION >>>\n" +
-            "Relay " + phase + " (" + phaseName + ") -> " + action.toUpperCase() + "\n" +
-            symbol + "\n" +
-            ">>>>>>>>>>>>>>>>>>>>>>>";
-  
-  print(msg);
+function logError(message) {
+  print("[PRO3EM] ERROR: " + message);
 }
 
-function sendCommand(relay, action) {
-  if (CONFIG.MODE_SIMULATION) {
-    // SIMULATION MODE: display action without executing
-    logSimulatedAction(action, relay);
+function buildRpcUrl(method, params) {
+  return "http://" + CONFIG.PRO3_IP + "/rpc/" + method + "?" + params;
+}
 
-    // Update stats
-    if (action === "off") {
-      stats.sheddings[relay]++;
-    } else {
-      stats.restorations[relay]++;
-    }
-  } else {
-    // PRODUCTION MODE: send real HTTP command
-    let url = "http://" + CONFIG.PRO3_IP + "/relay/" + relay + "?turn=" + action;
-    
-    Shelly.call("HTTP.GET", {url: url}, function(result, error_code, error_message) {
+function validateCurrent(value, phaseName) {
+  // Return 0 if value is invalid (NaN, negative, or not a number)
+  if (typeof value !== "number" || isNaN(value) || value < 0) {
+    logError("Invalid current value for " + phaseName + ": " + value);
+    return 0;
+  }
+  return value;
+}
+
+function sendCommand(phaseName, action) {
+  let isOn = (action === "on");
+
+  // Log action
+  log("ACTION: " + phaseName + " -> " + action.toUpperCase());
+
+  // Send real command via RPC API if PRO3_IP is configured
+  if (CONFIG.PRO3_IP) {
+    let relay = CONFIG.PHASES[phaseName].relayIndex;
+    let url = buildRpcUrl("Switch.Set", "id=" + relay + "&on=" + isOn);
+
+    Shelly.call("HTTP.GET", {url: url}, function(_result, error_code, error_message) {
       if (error_code !== 0) {
-        log("ERROR relay command " + relay + ": " + error_message);
+        logError("Relay command " + phaseName + ": " + error_message);
       } else {
-        log("Command sent: relay " + relay + " -> " + action);
+        log("Command sent: " + phaseName + " -> " + action);
       }
     });
+  } else {
+    log("SIMULATION: Would send " + action + " to " + phaseName);
   }
-  
-  // 📡 Publish relay state on MQTT
-  let newState = (action === "on");
-  publishRelayState(relay, newState);
+
+  // Publish relay state on MQTT
+  publishRelayState(phaseName, isOn);
 }
 
 function sendHeartbeat() {
-  if (CONFIG.MODE_SIMULATION) {
-    // In simulation, just log
-    log("Simulated heartbeat");
-  } else {
-    // In production, send real heartbeat
-    let url = "http://" + CONFIG.PRO3_IP + "/rpc/Shelly.SetVar?name=heartbeat&value=" + Date.now();
-    
-    Shelly.call("HTTP.GET", {url: url}, function(result, error_code, error_message) {
-      if (error_code !== 0) {
-        log("ERROR heartbeat: " + error_message);
-      }
-    });
-  }
+  if (!CONFIG.PRO3_IP) return;
+
+  let url = buildRpcUrl("Shelly.SetVar", "name=heartbeat&value=" + Date.now());
+
+  Shelly.call("HTTP.GET", {url: url}, function(_result, error_code, error_message) {
+    if (error_code !== 0) {
+      logError("Heartbeat: " + error_message);
+    }
+  });
 }
 
 // ============================================================================
@@ -155,178 +153,187 @@ function sendHeartbeat() {
 
 function publishMQTT(topic, payload, retain) {
   if (!CONFIG.MQTT_ENABLED) return;
-  
+
   let fullTopic = CONFIG.MQTT_TOPIC_PREFIX + "/" + topic;
-  
-  // Convert payload to string if it's an object
   let message = typeof payload === "object" ? JSON.stringify(payload) : String(payload);
-  
-  MQTT.publish(fullTopic, message, 0, retain || false);
-  
-  if (CONFIG.DEBUG) {
-    log("[MQTT] " + fullTopic + " = " + message);
-  }
+
+  MQTT.publish(fullTopic, message, 0, retain);
+
+  log("[MQTT] " + fullTopic + " = " + message);
 }
 
-function publishRelayState(phase, relayState) {
-  let phaseName = ["L1", "L2", "L3"][phase];
-  
-  // Shelly RPC format
-  let stateMsg = {
-    method: "NotifyState",
+function createRPCMessage(method, data) {
+  return {
+    method: method,
     params: {
       ts: Date.now(),
-      data: {
-        phase: phaseName,
-        active: relayState ? true : false
-      }
+      data: data
     }
   };
-  
-  // Publish state (with retain to keep last state)
-  publishMQTT(phaseName + "/state", stateMsg, true);
 }
 
-function publishEvent(phase, action, current) {
-  let phaseName = ["L1", "L2", "L3"][phase];
-  
-  // Shelly RPC format
-  let event = {
-    method: "NotifyEvent",
-    params: {
-      ts: Date.now(),
-      data: {
-        phase: phaseName,
-        relay: phase,
-        action: action,
-        current: current ? current.toFixed(2) : null
-      }
-    }
-  };
-  
-  // Publish on events topic (without retain, it's a stream)
-  publishMQTT("events", event, false);
-  
-  // Also publish on phase-specific topic
-  publishMQTT(phaseName + "/event", event, false);
+function publishRelayState(phaseName, relayState) {
+  let msg = createRPCMessage("NotifyState", {
+    phase: phaseName,
+    active: relayState,
+    status: state.phases[phaseName].status
+  });
+
+  publishMQTT(phaseName + "/state", msg, true);
+}
+
+function publishEvent(phaseName, action, current) {
+  let msg = createRPCMessage("NotifyEvent", {
+    phase: phaseName,
+    relay: CONFIG.PHASES[phaseName].relayIndex,
+    action: action,
+    current: current ? current.toFixed(2) : null,
+    status: state.phases[phaseName].status
+  });
+
+  publishMQTT("events", msg, false);
+  publishMQTT(phaseName + "/event", msg, false);
 }
 
 function publishRegularStates() {
-  // Publish each relay state
-  publishRelayState(0, state.relay[0]);
-  publishRelayState(1, state.relay[1]);
-  publishRelayState(2, state.relay[2]);
-  
-  // Publish global heartbeat
-  let status = {
-    method: "NotifyStatus",
-    params: {
-      ts: Date.now(),
-      data: {
-        l1_active: state.relay[0] ? true : false,
-        l2_active: state.relay[1] ? true : false,
-        l3_active: state.relay[2] ? true : false
-      }
-    }
-  };
-  
-  publishMQTT("status", status, false);
-  
-  if (CONFIG.DEBUG) {
-    log("[MQTT] Regular states published");
-  }
-}
+  // Build global status and publish individual relay states
+  let statusData = {};
+  for (let phaseName in state.phases) {
+    let phaseState = state.phases[phaseName];
 
-function displayStats() {
-  if (!CONFIG.MODE_SIMULATION) return;
-  
-  let duration = Math.floor((Date.now() - stats.startTime) / 1000);
-  
-  let msg = "\n=== SIMULATION STATS ===\n" +
-            "Duration: " + duration + "s | Cycles: " + stats.cycles + "\n" +
-            "L1: Shed=" + stats.sheddings[0] + " Restore=" + stats.restorations[0] + " | State: " + (state.relay[0] ? "ON" : "OFF") + "\n" +
-            "L2: Shed=" + stats.sheddings[1] + " Restore=" + stats.restorations[1] + " | State: " + (state.relay[1] ? "ON" : "OFF") + "\n" +
-            "L3: Shed=" + stats.sheddings[2] + " Restore=" + stats.restorations[2] + " | State: " + (state.relay[2] ? "ON" : "OFF") + "\n" +
-            "========================\n";
-  
-  print(msg);
+    // Publish individual relay state
+    publishRelayState(phaseName, phaseState.relay);
+
+    // Add to global status
+    let phaseKey = phaseName.toLowerCase();
+    statusData[phaseKey + "_active"] = phaseState.relay;
+    statusData[phaseKey + "_status"] = phaseState.status;
+  }
+
+  // Publish global status
+  let msg = createRPCMessage("NotifyStatus", statusData);
+  publishMQTT("status", msg, false);
+
+  log("[MQTT] Regular states published");
 }
 
 // ============================================================================
 // SHEDDING LOGIC
 // ============================================================================
 
-function checkPhase(phase, current, sheddingThreshold, restorationThreshold) {
+function logPhaseMeasurements(emData) {
+  let measurements = [];
+
+  for (let phaseName in CONFIG.PHASES) {
+    let phaseConfig = CONFIG.PHASES[phaseName];
+    let phaseState = state.phases[phaseName];
+    let rawCurrent = emData[phaseConfig.emField];
+    let current = validateCurrent(rawCurrent !== undefined ? rawCurrent : 0, phaseName);
+
+    // Status indicator based on phase state
+    let indicator;
+    if (phaseState.status === "SHED") {
+      indicator = "[SHED]";
+    } else if (phaseState.status === "CRITICAL") {
+      indicator = "[CRIT]";
+    } else if (phaseState.status === "WARNING") {
+      indicator = "[WARN]";
+    } else {
+      indicator = "[OK]";
+    }
+
+    // Build measurement with relay state and status
+    let relayState = phaseState.relay ? "ON" : "OFF";
+    let measurement = indicator + phaseName + "=" + current.toFixed(2) + "A(" + relayState + "," + phaseState.status;
+
+    // Add restoration countdown if phase is shed and ready to restore
+    if (phaseState.status === "SHED") {
+      let elapsed = Date.now() - phaseState.lastShedding;
+      let remaining = Math.floor((CONFIG.RESTORATION_DELAY - elapsed) / 1000);
+      if (remaining > 0) {
+        measurement += ",↻" + remaining + "s";
+      }
+    }
+
+    measurement += ")";
+    measurements.push(measurement);
+  }
+
+  log("Measurements: " + measurements.join("  "));
+}
+
+function checkPhase(phaseName, current) {
   let now = Date.now();
-  let phaseName = ["L1", "L2", "L3"][phase];
-  
+  let phaseState = state.phases[phaseName];
+  let phaseConfig = CONFIG.PHASES[phaseName];
+
+  // Update current measurement
+  phaseState.current = current;
+
   // ---- OVERLOAD DETECTION ----
-  if (current > sheddingThreshold) {
-    state.exceedances[phase]++;
+  if (current > phaseConfig.sheddingThreshold) {
+    // Start tracking overload time if not already tracking
+    if (phaseState.overloadStartTime === null) {
+      phaseState.overloadStartTime = now;
+      phaseState.status = "CRITICAL";
+      log("OVERLOAD detected " + phaseName + ": " + current.toFixed(2) + "A > " + phaseConfig.sheddingThreshold + "A");
+    }
 
-    // Shed after X consecutive exceedances (filtering)
-    if (state.exceedances[phase] >= 2 && state.relay[phase]) {
-      log("OVERLOAD " + phaseName + ": " + current.toFixed(2) + "A > " + sheddingThreshold + "A");
+    // Only shed if relay is still ON
+    if (!phaseState.relay) return;
 
+    let overloadDuration = now - phaseState.overloadStartTime;
+
+    // Check if shedding is needed
+    let shouldShed = false;
+    let sheddingType = "";
+
+    if (current > phaseConfig.sheddingThreshold * CONFIG.IMMEDIATE_SHEDDING_MULTIPLIER) {
       // Immediate shedding if well above threshold
-      if (current > sheddingThreshold * 1.2) {
-        log("IMMEDIATE SHEDDING " + phaseName + " (overload > 120%)");
-        sendCommand(phase, "off");
-        state.relay[phase] = false;
-        state.lastShedding[phase] = now;
-        state.overload[phase] = true;
+      shouldShed = true;
+      sheddingType = "immediate";
+      log("IMMEDIATE SHEDDING " + phaseName + " (overload > " + (CONFIG.IMMEDIATE_SHEDDING_MULTIPLIER * 100) + "%)");
+    } else if (overloadDuration >= CONFIG.SHEDDING_DELAY) {
+      // Normal shedding after delay
+      shouldShed = true;
+      sheddingType = "normal";
+      log("SHEDDING " + phaseName + " (overload for " + (overloadDuration/1000).toFixed(1) + "s)");
+    }
 
-        // 📡 Publish MQTT event
-        publishEvent(phase, "immediate_shedding", current);
-      }
-      // Otherwise wait for delay
-      else if (!state.overload[phase]) {
-        log("Starting shedding delay " + phaseName + " (" + (CONFIG.SHEDDING_DELAY/1000) + "s)");
-        state.overload[phase] = true;
-
-        Timer.set(CONFIG.SHEDDING_DELAY, false, function() {
-          if (state.relay[phase]) {
-            log("Delay elapsed -> SHEDDING " + phaseName);
-
-            // Capture current for event
-            Shelly.call("EM.GetStatus", {id: 0}, function(status) {
-              let currentNow = 0;
-              if (phase === 0) currentNow = status.a_current || 0;
-              else if (phase === 1) currentNow = status.b_current || 0;
-              else currentNow = status.c_current || 0;
-
-              sendCommand(phase, "off");
-              state.relay[phase] = false;
-              state.lastShedding[phase] = Date.now();
-
-              // 📡 Publish MQTT event
-              publishEvent(phase, "shedding", currentNow);
-            });
-          }
-        });
-      }
+    if (shouldShed) {
+      sendCommand(phaseName, "off");
+      phaseState.relay = false;
+      phaseState.lastShedding = now;
+      phaseState.status = "SHED";
+      
+      publishEvent(phaseName, sheddingType + "_shedding", current);
     }
   }
   // ---- NO OVERLOAD ----
   else {
-    state.exceedances[phase] = 0;
-    state.overload[phase] = false;
+    // Reset overload tracking only if relay is ON
+    if (phaseState.overloadStartTime !== null && phaseState.relay) {
+      log("CANCEL overload tracking " + phaseName + " (current back to normal)");
+      phaseState.overloadStartTime = null;
+    }
 
-    // ---- RESTORATION ----
-    if (current < restorationThreshold && !state.relay[phase]) {
-      let elapsed = now - state.lastShedding[phase];
+    // ---- STATUS UPDATE OR RESTORATION ----
+    if (phaseState.relay) {
+      // Relay is ON - update status based on current level
+      phaseState.status = current < phaseConfig.restorationThreshold ? "NORMAL" : "WARNING";
+    } else {
+      // Relay is OFF (SHED) - check for restoration
+      if (current < phaseConfig.restorationThreshold) {
+        let elapsed = now - phaseState.lastShedding;
 
-      if (elapsed >= CONFIG.RESTORATION_DELAY) {
-        log("RESTORATION " + phaseName + " (delay " + (CONFIG.RESTORATION_DELAY/1000) + "s elapsed)");
-        sendCommand(phase, "on");
-        state.relay[phase] = true;
+        if (elapsed >= CONFIG.RESTORATION_DELAY) {
+          log("RESTORATION " + phaseName + " (delay " + (CONFIG.RESTORATION_DELAY/1000) + "s elapsed)");
+          sendCommand(phaseName, "on");
+          phaseState.relay = true;
+          phaseState.status = "NORMAL";
+          phaseState.overloadStartTime = null;
 
-        // 📡 Publish MQTT event
-        publishEvent(phase, "restoration", current);
-      } else {
-        let remaining = Math.floor((CONFIG.RESTORATION_DELAY - elapsed) / 1000);
-        if (remaining % 30 === 0) { // Display every 30s
-          log(phaseName + " can restore in " + remaining + "s");
+          publishEvent(phaseName, "restoration", current);
         }
       }
     }
@@ -334,140 +341,69 @@ function checkPhase(phase, current, sheddingThreshold, restorationThreshold) {
 }
 
 // ============================================================================
-// MAIN CYCLE
+// MAIN CYCLE (triggered by status updates)
 // ============================================================================
 
-function mainCycle() {
-  if (CONFIG.MODE_SIMULATION) {
-    stats.cycles++;
+function handleEMStatusUpdate(msg) {
+  // Only process EM status updates (ignore other component updates)
+  if (!msg || !msg.component || msg.component !== "em:0") return;
+
+  // Use delta if available, otherwise use full info
+  let emData = msg.delta || msg.info;
+  if (!emData) return;
+
+  // Check all phases
+  for (let phaseName in CONFIG.PHASES) {
+    let rawCurrent = emData[CONFIG.PHASES[phaseName].emField];
+    let current = validateCurrent(rawCurrent !== undefined ? rawCurrent : 0, phaseName);
+    checkPhase(phaseName, current);
   }
 
-  // Check forced shedding variable
-  Shelly.call("KVS.Get", {key: CONFIG.FORCE_SHEDDING_VAR}, function(result, error_code) {
-    let forceShedding = false;
-
-    if (error_code === 0 && result && result.value !== undefined) {
-      // Parse the value (can be boolean, string "true"/"false", or number 1/0)
-      if (typeof result.value === "boolean") {
-        forceShedding = result.value;
-      } else if (typeof result.value === "string") {
-        forceShedding = (result.value.toLowerCase() === "true" || result.value === "1");
-      } else if (typeof result.value === "number") {
-        forceShedding = (result.value === 1);
-      }
-    }
-
-    // If force shedding mode changed, log it
-    if (forceShedding !== state.forcedShedding) {
-      state.forcedShedding = forceShedding;
-      log("🔒 FORCED SHEDDING MODE: " + (forceShedding ? "ENABLED" : "DISABLED"));
-
-      // If entering forced mode, shed all relays
-      if (forceShedding) {
-        for (let i = 0; i < 3; i++) {
-          if (state.relay[i]) {
-            sendCommand(i, "off");
-            state.relay[i] = false;
-            publishEvent(i, "forced_shedding", 0);
-          }
-        }
-      }
-    }
-
-    // If forced shedding is active, keep all relays off and skip normal checks
-    if (state.forcedShedding) {
-      for (let i = 0; i < 3; i++) {
-        if (state.relay[i]) {
-          sendCommand(i, "off");
-          state.relay[i] = false;
-        }
-      }
-      return; // Skip normal load shedding logic
-    }
-
-    // Normal operation: read currents and check phases
-    Shelly.call("EM.GetStatus", {id: 0}, function(status, error_code, error_message) {
-      if (error_code !== 0) {
-        log("ERROR reading EM: " + error_message);
-        return;
-      }
-
-      // Currents per phase
-      let I_L1 = status.a_current || 0;
-      let I_L2 = status.b_current || 0;
-      let I_L3 = status.c_current || 0;
-
-      // Display with color codes in simulation mode
-      if (CONFIG.MODE_SIMULATION) {
-        let color_L1 = I_L1 > CONFIG.SHEDDING_THRESHOLD_L1 ? "[!]" : (I_L1 > CONFIG.RESTORATION_THRESHOLD_L1 ? "[~]" : "[OK]");
-        let color_L2 = I_L2 > CONFIG.SHEDDING_THRESHOLD_L2 ? "[!]" : (I_L2 > CONFIG.RESTORATION_THRESHOLD_L2 ? "[~]" : "[OK]");
-        let color_L3 = I_L3 > CONFIG.SHEDDING_THRESHOLD_L3 ? "[!]" : (I_L3 > CONFIG.RESTORATION_THRESHOLD_L3 ? "[~]" : "[OK]");
-
-        log("Measurements: " +
-            color_L1 + "L1=" + I_L1.toFixed(2) + "A  " +
-            color_L2 + "L2=" + I_L2.toFixed(2) + "A  " +
-            color_L3 + "L3=" + I_L3.toFixed(2) + "A");
-      } else {
-        log("Measurements: L1=" + I_L1.toFixed(2) + "A, L2=" + I_L2.toFixed(2) + "A, L3=" + I_L3.toFixed(2) + "A");
-      }
-
-      // Check each phase
-      checkPhase(0, I_L1, CONFIG.SHEDDING_THRESHOLD_L1, CONFIG.RESTORATION_THRESHOLD_L1);
-      checkPhase(1, I_L2, CONFIG.SHEDDING_THRESHOLD_L2, CONFIG.RESTORATION_THRESHOLD_L2);
-      checkPhase(2, I_L3, CONFIG.SHEDDING_THRESHOLD_L3, CONFIG.RESTORATION_THRESHOLD_L3);
-    });
-  });
+  // Log measurements
+  logPhaseMeasurements(emData);
+  sendHeartbeat();
 }
 
 // ============================================================================
 // STARTUP
 // ============================================================================
 
-let mode = CONFIG.MODE_SIMULATION ? "SIMULATION MODE" : "PRODUCTION MODE";
+// Initialize state
+init();
+
+let mode = CONFIG.PRO3_IP ? "PRODUCTION MODE" : "SIMULATION MODE";
 let header = "\n" +
              "==============================================\n" +
              "  INTELLIGENT THREE-PHASE LOAD SHEDDING\n" +
              "==============================================\n" +
              "MODE: " + mode + "\n" +
-             (CONFIG.MODE_SIMULATION ? "-> Actions simulated and displayed only\n" : "-> Real commands sent to Pro 3EM\n") +
+             (CONFIG.PRO3_IP ? "-> Real commands sent to Pro 3EM\n" : "-> Simulation mode (no commands sent)\n") +
              "==============================================\n";
 print(header);
 
-let startMsg = "Pro 3 IP: " + CONFIG.PRO3_IP + "\n" +
-               "Shedding thresholds: L1=" + CONFIG.SHEDDING_THRESHOLD_L1 + "A, L2=" + CONFIG.SHEDDING_THRESHOLD_L2 + "A, L3=" + CONFIG.SHEDDING_THRESHOLD_L3 + "A\n" +
-               "Restoration thresholds: L1=" + CONFIG.RESTORATION_THRESHOLD_L1 + "A, L2=" + CONFIG.RESTORATION_THRESHOLD_L2 + "A, L3=" + CONFIG.RESTORATION_THRESHOLD_L3 + "A\n" +
+// Build thresholds info dynamically
+let thresholdsInfo = "";
+for (let phaseName in CONFIG.PHASES) {
+  let cfg = CONFIG.PHASES[phaseName];
+  thresholdsInfo += phaseName + ": shed=" + cfg.sheddingThreshold + "A, restore=" + cfg.restorationThreshold + "A\n";
+}
+
+let startMsg = (CONFIG.PRO3_IP ? "Pro 3 IP: " + CONFIG.PRO3_IP + "\n" : "") +
+               "Phase thresholds:\n" + thresholdsInfo +
                "Restoration delay: " + (CONFIG.RESTORATION_DELAY/1000) + "s\n" +
                "MQTT: " + (CONFIG.MQTT_ENABLED ? "Enabled (prefix: " + CONFIG.MQTT_TOPIC_PREFIX + ")" : "Disabled") + "\n\n" +
                "[OK] System operational!\n";
-
-if (CONFIG.MODE_SIMULATION) {
-  startMsg += "[INFO] Stats displayed every 60 seconds\n";
-}
 
 log(startMsg);
 
 // 📡 Publish initial states on MQTT
 if (CONFIG.MQTT_ENABLED) {
-  publishRelayState(0, state.relay[0]);
-  publishRelayState(1, state.relay[1]);
-  publishRelayState(2, state.relay[2]);
   publishRegularStates();
   log("[MQTT] Initial states published");
-}
-
-// Main cycle timer
-Timer.set(CONFIG.CYCLE_INTERVAL, true, mainCycle);
-
-// Heartbeat timer
-Timer.set(CONFIG.HEARTBEAT_INTERVAL, true, sendHeartbeat);
-
-// Stats timer (only in simulation mode)
-if (CONFIG.MODE_SIMULATION) {
-  Timer.set(60000, true, displayStats);
-}
-
-// Regular MQTT publication timer
-if (CONFIG.MQTT_ENABLED) {
   Timer.set(CONFIG.MQTT_PUBLISH_INTERVAL, true, publishRegularStates);
-  log("[MQTT] State publication every " + (CONFIG.MQTT_PUBLISH_INTERVAL/1000) + "s");
+  log("MQTT state publication every " + (CONFIG.MQTT_PUBLISH_INTERVAL/1000) + "s");
 }
+
+// Register status handler (triggered on EM updates)
+Shelly.addStatusHandler(handleEMStatusUpdate);
+log("Status handler registered for EM:0 updates");
