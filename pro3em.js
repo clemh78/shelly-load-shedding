@@ -52,7 +52,11 @@ let CONFIG = {
   // 📡 MQTT
   MQTT_ENABLED: true,         // Enable MQTT publishing
   MQTT_TOPIC_PREFIX: "load_shedding",  // MQTT topic prefix
-  MQTT_PUBLISH_INTERVAL: 30000      // Publish states every 30s
+  MQTT_PUBLISH_INTERVAL: 30000,     // Publish states every 30s
+
+  // 🔌 PRO 3 CONNECTION
+  HEARTBEAT_INTERVAL: 10000,        // Heartbeat check every 10s
+  MAX_CONSECUTIVE_FAILURES: 1       // Mark offline after 1 failed heartbeat
 };
 
 // ============================================================================
@@ -60,7 +64,8 @@ let CONFIG = {
 // ============================================================================
 
 let state = {
-  phases: {}                        // Initialized by init()
+  phases: {},                       // Initialized by init()
+  relays: {}                        // Initialized by init()
 };
 
 // ============================================================================
@@ -78,6 +83,10 @@ function init() {
       lastShedding: 0               // Timestamp of last shedding
     };
   }
+
+  // Initialize Pro 3 connection state
+  state.relays.online = false;
+  state.relays.consecutiveFailures = 0;
 
   log("Phases initialized: " + Object.keys(state.phases).join(", "));
 }
@@ -117,6 +126,12 @@ function sendCommand(phaseName, action) {
 
   // Send real command via RPC API if PRO3_IP is configured
   if (CONFIG.PRO3_IP) {
+    // Check if Pro 3 is online before sending command
+    if (!state.relays.online) {
+      logError("Cannot send command to " + phaseName + " - Pro 3 is OFFLINE");
+      return;
+    }
+
     let relay = CONFIG.PHASES[phaseName].relayIndex;
     let url = buildRpcUrl("Switch.Set", "id=" + relay + "&on=" + isOn);
 
@@ -135,14 +150,78 @@ function sendCommand(phaseName, action) {
   publishRelayState(phaseName, isOn);
 }
 
-function sendHeartbeat() {
-  if (!CONFIG.PRO3_IP) return;
+function syncRelayStates() {
+  if (!CONFIG.PRO3_IP) {
+    return;
+  }
 
-  let url = buildRpcUrl("Shelly.SetVar", "name=heartbeat&value=" + Date.now());
+  log("SYNC: Starting relay synchronization...");
+
+  // Synchronize each phase's relay
+  for (let phaseName in CONFIG.PHASES) {
+    let phaseConfig = CONFIG.PHASES[phaseName];
+    let phaseState = state.phases[phaseName];
+    let relayIndex = phaseConfig.relayIndex;
+    let desiredState = phaseState.relay;
+
+    // Query actual relay state
+    let url = buildRpcUrl("Switch.GetStatus", "id=" + relayIndex);
+
+    Shelly.call("HTTP.GET", {url: url}, function(result, error_code, error_message) {
+      if (error_code !== 0) {
+        logError("SYNC: Failed to get relay " + phaseName + " status: " + error_message);
+        return;
+      }
+
+      // Parse the response to get actual relay state
+      let actualState = result && result.body ? JSON.parse(result.body).output : null;
+
+      if (actualState === null) {
+        logError("SYNC: Could not parse relay " + phaseName + " state");
+        return;
+      }
+
+      // Compare and sync if different
+      if (actualState !== desiredState) {
+        log("SYNC: " + phaseName + " mismatch - actual: " + (actualState ? "ON" : "OFF") + ", desired: " + (desiredState ? "ON" : "OFF"));
+        sendCommand(phaseName, desiredState ? "on" : "off");
+      } else {
+        log("SYNC: " + phaseName + " is in sync (" + (actualState ? "ON" : "OFF") + ")");
+      }
+    });
+  }
+}
+
+function sendHeartbeat() {
+  if (!CONFIG.PRO3_IP) {
+    return;
+  }
+
+  let wasOnline = state.relays.online;
+  let timestamp = Date.now();
+  let url = buildRpcUrl("KVS.Set", "key=\"pro3em_heartbeat\"&value=" + timestamp);
 
   Shelly.call("HTTP.GET", {url: url}, function(_result, error_code, error_message) {
     if (error_code !== 0) {
-      logError("Heartbeat: " + error_message);
+      // Heartbeat failed = Pro 3 is offline
+      state.relays.consecutiveFailures++;
+      log("Heartbeat failed (" + state.relays.consecutiveFailures + "/" + CONFIG.MAX_CONSECUTIVE_FAILURES + "): " + error_message);
+
+      if (state.relays.consecutiveFailures >= CONFIG.MAX_CONSECUTIVE_FAILURES && wasOnline) {
+        state.relays.online = false;
+        logError("Pro 3 is now OFFLINE");
+      }
+    } else {
+      // Heartbeat succeeded = Pro 3 is online
+      state.relays.consecutiveFailures = 0;
+
+      if (!wasOnline) {
+        // Was offline, now online (reconnection or first connection at startup)
+        state.relays.online = true;
+        log("Pro 3 is now ONLINE - triggering relay synchronization");
+        syncRelayStates();
+      }
+      // else: already online, everything ok (no action needed)
     }
   });
 }
@@ -361,7 +440,6 @@ function handleEMStatusUpdate(msg) {
 
   // Log measurements
   logPhaseMeasurements(emData);
-  sendHeartbeat();
 }
 
 // ============================================================================
@@ -402,6 +480,15 @@ if (CONFIG.MQTT_ENABLED) {
   log("[MQTT] Initial states published");
   Timer.set(CONFIG.MQTT_PUBLISH_INTERVAL, true, publishRegularStates);
   log("MQTT state publication every " + (CONFIG.MQTT_PUBLISH_INTERVAL/1000) + "s");
+}
+
+// 🔌 Start heartbeat monitoring and safety protection
+if (CONFIG.PRO3_IP) {
+  sendHeartbeat();  // Initial heartbeat (also checks connection)
+  Timer.set(CONFIG.HEARTBEAT_INTERVAL, true, sendHeartbeat);
+  log("Heartbeat + connection monitoring started (every " + (CONFIG.HEARTBEAT_INTERVAL/1000) + "s, max failures: " + CONFIG.MAX_CONSECUTIVE_FAILURES + ")");
+} else {
+  log("Simulation mode - heartbeat monitoring disabled");
 }
 
 // Register status handler (triggered on EM updates)
