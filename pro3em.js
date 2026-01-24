@@ -1,6 +1,6 @@
 /******************************************************************************
  * INTELLIGENT THREE-PHASE LOAD SHEDDING - Pro 3EM
- * Version: 1.0
+ * Version: 1.1
  * Author: Clément
  *
  * Installation: Shelly Pro 3EM → Settings → Scripts → Add Script

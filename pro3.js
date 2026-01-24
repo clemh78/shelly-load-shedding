@@ -1,6 +1,6 @@
 /******************************************************************************
  * PRO 3 SAFETY PROTECTION SCRIPT
- * Version: 1.0
+ * Version: 1.1
  * Author: Clément
  *
  * Installation: Shelly Pro 3 → Settings → Scripts → Add Script
