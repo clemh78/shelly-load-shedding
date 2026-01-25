@@ -150,6 +150,39 @@ function sendCommand(phaseName, action) {
   publishRelayState(phaseName, isOn);
 }
 
+function syncRelayState(phaseName) {
+  let phaseConfig = CONFIG.PHASES[phaseName];
+  let phaseState = state.phases[phaseName];
+  let relayIndex = phaseConfig.relayIndex;
+  let desiredState = phaseState.relay;
+
+  // Query actual relay state
+  let url = buildRpcUrl("Switch.GetStatus", "id=" + relayIndex);
+
+  Shelly.call("HTTP.GET", {url: url}, function(result, error_code, error_message) {
+    if (error_code !== 0) {
+      logError("SYNC: Failed to get relay " + phaseName + " status: " + error_message);
+      return;
+    }
+
+    // Parse the response to get actual relay state
+    let actualState = result && result.body ? JSON.parse(result.body).output : null;
+
+    if (actualState === null) {
+      logError("SYNC: Could not parse relay " + phaseName + " state");
+      return;
+    }
+
+    // Compare and sync if different
+    if (actualState !== desiredState) {
+      log("SYNC: " + phaseName + " mismatch - actual: " + (actualState ? "ON" : "OFF") + ", desired: " + (desiredState ? "ON" : "OFF"));
+      sendCommand(phaseName, desiredState ? "on" : "off");
+    } else {
+      log("SYNC: " + phaseName + " is in sync (" + (actualState ? "ON" : "OFF") + ")");
+    }
+  });
+}
+
 function syncRelayStates() {
   if (!CONFIG.PRO3_IP) {
     return;
@@ -159,36 +192,7 @@ function syncRelayStates() {
 
   // Synchronize each phase's relay
   for (let phaseName in CONFIG.PHASES) {
-    let phaseConfig = CONFIG.PHASES[phaseName];
-    let phaseState = state.phases[phaseName];
-    let relayIndex = phaseConfig.relayIndex;
-    let desiredState = phaseState.relay;
-
-    // Query actual relay state
-    let url = buildRpcUrl("Switch.GetStatus", "id=" + relayIndex);
-
-    Shelly.call("HTTP.GET", {url: url}, function(result, error_code, error_message) {
-      if (error_code !== 0) {
-        logError("SYNC: Failed to get relay " + phaseName + " status: " + error_message);
-        return;
-      }
-
-      // Parse the response to get actual relay state
-      let actualState = result && result.body ? JSON.parse(result.body).output : null;
-
-      if (actualState === null) {
-        logError("SYNC: Could not parse relay " + phaseName + " state");
-        return;
-      }
-
-      // Compare and sync if different
-      if (actualState !== desiredState) {
-        log("SYNC: " + phaseName + " mismatch - actual: " + (actualState ? "ON" : "OFF") + ", desired: " + (desiredState ? "ON" : "OFF"));
-        sendCommand(phaseName, desiredState ? "on" : "off");
-      } else {
-        log("SYNC: " + phaseName + " is in sync (" + (actualState ? "ON" : "OFF") + ")");
-      }
-    });
+    syncRelayState(phaseName);
   }
 }
 
