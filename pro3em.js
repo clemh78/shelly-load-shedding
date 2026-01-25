@@ -1,6 +1,6 @@
 /******************************************************************************
  * INTELLIGENT THREE-PHASE LOAD SHEDDING - Pro 3EM
- * Version: 1.1
+ * Version: 1.2
  * Author: Clément
  *
  * Installation: Shelly Pro 3EM → Settings → Scripts → Add Script
@@ -51,7 +51,7 @@ let CONFIG = {
   
   // 📡 MQTT
   MQTT_ENABLED: true,         // Enable MQTT publishing
-  MQTT_TOPIC_PREFIX: "load_shedding",  // MQTT topic prefix
+  MQTT_TOPIC_PREFIX: "load-shedding-14335cc56020",  // MQTT topic prefix
   MQTT_PUBLISH_INTERVAL: 30000,     // Publish states every 30s
 
   // 🔌 PRO 3 CONNECTION
@@ -202,8 +202,7 @@ function sendHeartbeat() {
   }
 
   let wasOnline = state.relays.online;
-  let timestamp = Date.now();
-  let url = buildRpcUrl("KVS.Set", "key=\"pro3em_heartbeat\"&value=" + timestamp);
+  let url = buildRpcUrl("Shelly.GetStatus", "");
 
   Shelly.call("HTTP.GET", {url: url}, function(_result, error_code, error_message) {
     if (error_code !== 0) {
