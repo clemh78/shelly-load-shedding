@@ -32,8 +32,13 @@ let CONFIG = {
   VERSION: "1.4",
 
   // 🔒 SAFETY SETTINGS
+  // CRITICAL: Pro3EM must detect offline BEFORE Pro3 triggers emergency shutdown
+  // Pro3EM detection time: ~15s (see HEARTBEAT_INTERVAL + HTTP_TIMEOUT in pro3em.js)
+  // Pro3 emergency trigger: 60s (HEARTBEAT_TIMEOUT below)
+  // Safety margin: ~45s - ensures Pro3EM marks Pro3 offline and will re-sync when connection restored
   HEARTBEAT_CHECK_INTERVAL: 5000,   // Check for missing heartbeat every 5s
-  HEARTBEAT_TIMEOUT: 30000,         // Emergency shutdown if no heartbeat for 30s (3x expected interval from Pro3EM)
+  HEARTBEAT_TIMEOUT: 60000,         // Emergency shutdown if no heartbeat for 60s (6x expected interval from Pro3EM)
+  HEARTBEAT_GRACE_PERIOD: 30000,    // Grace period after startup/first connection before enforcing timeout (30s)
   EMERGENCY_SHUTDOWN_TIMEOUT: 10000, // Force emergency mode if relay cuts don't complete within 10s
 
   // Debug mode
@@ -58,6 +63,7 @@ let state = {
   heartbeat: {
     online: null,                   // Is Pro 3EM online? (null = unknown, true = online, false = offline)
     lastPing: null,                 // Timestamp of last heartbeat received from Pro3EM (null = never received)
+    firstPing: null,                // Timestamp of first heartbeat received (for grace period)
     timerId: null                   // ID of periodic heartbeat check timer
   },
 
@@ -238,6 +244,12 @@ function handleHeartbeat(_request, response) {
   // Update last heartbeat timestamp
   state.heartbeat.lastPing = now;
 
+  // Record first heartbeat timestamp (for grace period)
+  if (state.heartbeat.firstPing === null) {
+    state.heartbeat.firstPing = now;
+    log("First heartbeat received - grace period active for " + (CONFIG.HEARTBEAT_GRACE_PERIOD / 1000) + "s");
+  }
+
   // Mark Pro3EM as online
   if (wasOnline !== true) {
     // Was offline/unknown, now online (reconnection or first connection)
@@ -246,7 +258,10 @@ function handleHeartbeat(_request, response) {
     state.heartbeat.online = true;
     log("💚 Pro 3EM is now ONLINE" + (isReconnection ? " (reconnected)" : " (first connection)"));
 
+    // Reset grace period on reconnection (to allow Pro3EM time to resync)
     if (isReconnection) {
+      state.heartbeat.firstPing = now;
+      log("Grace period reactivated for " + (CONFIG.HEARTBEAT_GRACE_PERIOD / 1000) + "s (allows Pro3EM to resync)");
       publishEvent("heartbeat_restored", {});
       cancelEmergencyShutdown();
     } else if (isFirstConnection) {
@@ -291,6 +306,15 @@ function checkHeartbeatTimeout() {
 
   let now = Date.now();
   let elapsed = now - state.heartbeat.lastPing;
+
+  // Check if we're still in grace period (after startup or first connection)
+  if (state.heartbeat.firstPing !== null) {
+    let timeSinceFirst = now - state.heartbeat.firstPing;
+    if (timeSinceFirst < CONFIG.HEARTBEAT_GRACE_PERIOD) {
+      log("Grace period active (" + (timeSinceFirst / 1000).toFixed(1) + "s / " + (CONFIG.HEARTBEAT_GRACE_PERIOD / 1000) + "s) - heartbeat timeout check skipped");
+      return;
+    }
+  }
 
   // Log periodic status for monitoring
   if (state.heartbeat.online === true) {
@@ -452,6 +476,7 @@ let header = "\n" +
              "==============================================\n" +
              "Monitored relays: " + CONFIG.RELAYS.length + "\n" +
              "Heartbeat timeout: " + (CONFIG.HEARTBEAT_TIMEOUT / 1000) + "s\n" +
+             "Grace period: " + (CONFIG.HEARTBEAT_GRACE_PERIOD / 1000) + "s\n" +
              "Check interval: " + (CONFIG.HEARTBEAT_CHECK_INTERVAL / 1000) + "s\n" +
              "HTTPServer endpoint: /script/1/heartbeat\n" +
              "MQTT: " + (CONFIG.MQTT_ENABLED ? "Enabled (prefix: " + CONFIG.MQTT_TOPIC_PREFIX + ")" : "Disabled") + "\n" +

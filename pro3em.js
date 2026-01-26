@@ -59,6 +59,10 @@ let CONFIG = {
   MQTT_PUBLISH_INTERVAL: 30000,     // Publish states every 30s
 
   // 🔌 PRO 3 CONNECTION
+  // CRITICAL: Pro3EM must detect offline BEFORE Pro3 triggers emergency shutdown
+  // Pro3EM detection time: ~15s (HEARTBEAT_INTERVAL + HTTP_TIMEOUT)
+  // Pro3 emergency trigger: 30s (see HEARTBEAT_TIMEOUT in pro3.js)
+  // Safety margin: ~15s
   HEARTBEAT_INTERVAL: 10000,        // Heartbeat check every 10s
   MAX_CONSECUTIVE_FAILURES: 1,      // Mark offline after 1 failed heartbeat
   HTTP_TIMEOUT: 5000                // HTTP request timeout (5s)
