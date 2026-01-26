@@ -1,6 +1,5 @@
 /******************************************************************************
  * PRO 3 SAFETY PROTECTION SCRIPT
- * Version: 1.3
  * Author: Clément
  *
  * Installation: Shelly Pro 3 → Settings → Scripts → Add Script
@@ -10,9 +9,10 @@
  * 📡 MQTT: Publishes relay states and heartbeat status
  *
  * How it works:
- * - Pro 3 sends HTTP heartbeat to Pro 3EM every 10 seconds
- * - Pro 3EM sends HTTP heartbeat to Pro 3 every 10 seconds (bidirectional)
- * - If heartbeat fails → cut all relays (emergency shutdown)
+ * - Pro 3 exposes HTTP endpoint /heartbeat via HTTPServer
+ * - Pro 3EM calls this endpoint every 10 seconds
+ * - Pro 3 monitors last heartbeat timestamp
+ * - If no heartbeat for 30s → cut all relays (emergency shutdown)
  * - When heartbeat resumes → log recovery (Pro 3EM will restore relays)
  * - Publishes relay states and events to MQTT
  *
@@ -28,13 +28,18 @@
 // ============================================================================
 
 let CONFIG = {
-  // Network addresses
-  PRO3EM_IP: "192.168.1.101",          // Pro 3EM IP address
+  // Script version
+  VERSION: "1.4",
 
   // 🔒 SAFETY SETTINGS
-  HEARTBEAT_INTERVAL: 10000,        // Send heartbeat every 10s
-  MAX_CONSECUTIVE_FAILURES: 3,      // Mark offline after 1 failed heartbeat
-  HTTP_TIMEOUT: 5000,               // HTTP request timeout (5s)
+  // CRITICAL: Pro3EM must detect offline BEFORE Pro3 triggers emergency shutdown
+  // Pro3EM detection time: ~15s (see HEARTBEAT_INTERVAL + HTTP_TIMEOUT in pro3em.js)
+  // Pro3 emergency trigger: 60s (HEARTBEAT_TIMEOUT below)
+  // Safety margin: ~45s - ensures Pro3EM marks Pro3 offline and will re-sync when connection restored
+  HEARTBEAT_CHECK_INTERVAL: 5000,   // Check for missing heartbeat every 5s
+  HEARTBEAT_TIMEOUT: 60000,         // Emergency shutdown if no heartbeat for 60s (6x expected interval from Pro3EM)
+  HEARTBEAT_GRACE_PERIOD: 30000,    // Grace period after startup/first connection before enforcing timeout (30s)
+  EMERGENCY_SHUTDOWN_TIMEOUT: 10000, // Force emergency mode if relay cuts don't complete within 10s
 
   // Debug mode
   DEBUG: true,
@@ -54,13 +59,25 @@ let CONFIG = {
 // ============================================================================
 
 let state = {
-  pro3em: {},                       // Pro 3EM connection state (initialized by init())
-  emergencyShutdownActive: false,   // Are we in emergency shutdown mode?
+  // 📡 Pro 3EM Connection & Heartbeat
+  heartbeat: {
+    online: null,                   // Is Pro 3EM online? (null = unknown, true = online, false = offline)
+    lastPing: null,                 // Timestamp of last heartbeat received from Pro3EM (null = never received)
+    firstPing: null,                // Timestamp of first heartbeat received (for grace period)
+    timerId: null                   // ID of periodic heartbeat check timer
+  },
+
+  // 🛡️ Emergency Shutdown Management
+  emergencyShutdown: {
+    active: false,                  // Are we in emergency shutdown mode?
+    activationInProgress: false     // Guard to prevent concurrent emergency shutdowns
+  },
+
+  // 🔌 Relay States
   relays: {},                       // Relay states (initialized by init())
-  heartbeatInProgress: false,       // Guard to prevent concurrent heartbeats
-  emergencyShutdownInProgress: false, // Guard to prevent concurrent emergency shutdowns
-  heartbeatTimerId: null,           // ID of periodic heartbeat timer (to stop/restart it)
-  ethernetConnected: false          // Ethernet connection state
+
+  // ⏱️ Metadata
+  startTime: Date.now()             // Script start timestamp for uptime calculation
 };
 
 // ============================================================================
@@ -68,12 +85,6 @@ let state = {
 // ============================================================================
 
 function init() {
-  // Initialize Pro 3EM connection state
-  state.pro3em = {
-    online: null,                   // Is Pro 3EM online? (null = unknown, true = online, false = offline)
-    consecutiveFailures: 0          // Count of consecutive heartbeat failures
-  };
-
   // Initialize relay states
   for (let i = 0; i < CONFIG.RELAYS.length; i++) {
     state.relays[CONFIG.RELAYS[i]] = {
@@ -83,8 +94,8 @@ function init() {
   }
 
   log("Pro 3 Safety Protection initialized");
-  log("Heartbeat interval: " + (CONFIG.HEARTBEAT_INTERVAL / 1000) + "s");
-  log("Max consecutive failures: " + CONFIG.MAX_CONSECUTIVE_FAILURES);
+  log("Heartbeat timeout: " + (CONFIG.HEARTBEAT_TIMEOUT / 1000) + "s");
+  log("Heartbeat check interval: " + (CONFIG.HEARTBEAT_CHECK_INTERVAL / 1000) + "s");
   log("Monitoring " + CONFIG.RELAYS.length + " relays");
 }
 
@@ -108,31 +119,34 @@ function logError(message) {
   print("[PRO3-SAFETY] ERROR: " + message);
 }
 
-function buildRpcUrl(method, params) {
-  return "http://" + CONFIG.PRO3EM_IP + "/rpc/" + method + (params ? "?" + params : "");
-}
-
-function buildHttpGetParams(url) {
-  return {
-    url: url,
-    timeout: CONFIG.HTTP_TIMEOUT
-  };
-}
-
 // ============================================================================
 // RELAY CONTROL
 // ============================================================================
 
-function cutRelay(relayId, onComplete) {
-  // Optimistic update - assume the relay will be cut
-  state.relays[relayId].on = false;
-  state.relays[relayId].lastUpdate = Date.now();
+// Helper to chain relay operations sequentially
+function chainRelayOperations(relayIds, operation, onComplete) {
+  if (relayIds.length === 0) {
+    if (onComplete) onComplete();
+    return;
+  }
 
+  let relayId = relayIds[0];
+  let remaining = relayIds.slice(1);
+
+  operation(relayId, function() {
+    chainRelayOperations(remaining, operation, onComplete);
+  });
+}
+
+function cutRelay(relayId, onComplete) {
   Shelly.call("Switch.Set", {id: relayId, on: false}, function(_result, error_code, error_message) {
     if (error_code !== 0) {
       logError("Failed to cut relay " + relayId + ": " + error_message);
       // Note: The status handler will update the actual state if it differs
     } else {
+      // Update state only on success
+      state.relays[relayId].on = false;
+      state.relays[relayId].lastUpdate = Date.now();
       log("✂️ Relay " + relayId + " cut");
     }
     if (onComplete) onComplete();
@@ -140,42 +154,50 @@ function cutRelay(relayId, onComplete) {
 }
 
 function emergencyShutdown() {
-  if (state.emergencyShutdownActive) {
+  if (state.emergencyShutdown.active) {
     return; // Already in emergency mode
   }
 
   // Prevent concurrent emergency shutdowns
-  if (state.emergencyShutdownInProgress) {
+  if (state.emergencyShutdown.activationInProgress) {
     log("Emergency shutdown already in progress, skipping");
     return;
   }
 
-  state.emergencyShutdownInProgress = true;
+  state.emergencyShutdown.activationInProgress = true;
   logError("🚨 EMERGENCY SHUTDOWN: Pro 3EM heartbeat lost - cutting all relays");
 
-  // Cut first relay, which will chain to others via callbacks (NO TIMERS!)
-  cutRelay(CONFIG.RELAYS[0], function() {
-    cutRelay(CONFIG.RELAYS[1], function() {
-      cutRelay(CONFIG.RELAYS[2], function() {
-        // All relays cut - publish events
-        publishEvent("emergency_shutdown", {
-          reason: "pro3em_heartbeat_lost"
-        });
-        publishRegularStates();
+  // Safety timeout: force emergency mode if callbacks don't complete
+  let safetyTimeout = Timer.set(CONFIG.EMERGENCY_SHUTDOWN_TIMEOUT, false, function() {
+    if (state.emergencyShutdown.activationInProgress) {
+      logError("Emergency shutdown timeout - forcing emergency mode");
+      state.emergencyShutdown.active = true;
+      state.emergencyShutdown.activationInProgress = false;
+    }
+  });
 
-        state.emergencyShutdownActive = true;
-        state.emergencyShutdownInProgress = false;
-      });
+  // Cut all relays sequentially via chained callbacks
+  chainRelayOperations(CONFIG.RELAYS, cutRelay, function() {
+    // Cancel safety timeout - we completed successfully
+    Timer.clear(safetyTimeout);
+
+    // All relays cut - publish events
+    publishEvent("emergency_shutdown", {
+      reason: "pro3em_heartbeat_lost"
     });
+    publishRegularStates();
+
+    state.emergencyShutdown.active = true;
+    state.emergencyShutdown.activationInProgress = false;
   });
 }
 
 function cancelEmergencyShutdown() {
-  if (!state.emergencyShutdownActive) {
+  if (!state.emergencyShutdown.active) {
     return;
   }
 
-  state.emergencyShutdownActive = false;
+  state.emergencyShutdown.active = false;
   log("✅ Pro 3EM heartbeat restored - emergency mode cancelled");
   log("   (Relays will be restored by Pro 3EM load shedding logic)");
 
@@ -189,7 +211,6 @@ function cancelEmergencyShutdown() {
 function fetchRelayStates() {
   log("Fetching initial relay states...");
 
-  // Chain callbacks to fetch sequentially - NO TIMERS!
   function fetchRelay(relayId, onComplete) {
     Shelly.call("Switch.GetStatus", {id: relayId}, function(result, error_code, error_message) {
       if (error_code !== 0) {
@@ -205,99 +226,113 @@ function fetchRelayStates() {
     });
   }
 
-  // Fetch relays sequentially
-  fetchRelay(CONFIG.RELAYS[0], function() {
-    fetchRelay(CONFIG.RELAYS[1], function() {
-      fetchRelay(CONFIG.RELAYS[2], function() {
-        log("Initial relay states fetched");
-      });
-    });
+  // Fetch all relays sequentially via chained callbacks
+  chainRelayOperations(CONFIG.RELAYS, fetchRelay, function() {
+    log("Initial relay states fetched");
   });
 }
 
 // ============================================================================
-// HEARTBEAT MONITORING
+// HEARTBEAT MONITORING (HTTP ENDPOINT)
 // ============================================================================
 
-function sendHeartbeat() {
-  // Prevent concurrent heartbeats
-  if (state.heartbeatInProgress) {
-    log("Skipping heartbeat (previous one still in progress)");
+// HTTP endpoint handler for /heartbeat (called by Pro3EM)
+function handleHeartbeat(_request, response) {
+  let now = Date.now();
+  let wasOnline = state.heartbeat.online;
+
+  // Update last heartbeat timestamp
+  state.heartbeat.lastPing = now;
+
+  // Record first heartbeat timestamp (for grace period)
+  if (state.heartbeat.firstPing === null) {
+    state.heartbeat.firstPing = now;
+    log("First heartbeat received - grace period active for " + (CONFIG.HEARTBEAT_GRACE_PERIOD / 1000) + "s");
+  }
+
+  // Mark Pro3EM as online
+  if (wasOnline !== true) {
+    // Was offline/unknown, now online (reconnection or first connection)
+    let isReconnection = wasOnline === false;
+    let isFirstConnection = wasOnline === null;
+    state.heartbeat.online = true;
+    log("💚 Pro 3EM is now ONLINE" + (isReconnection ? " (reconnected)" : " (first connection)"));
+
+    // Reset grace period on reconnection (to allow Pro3EM time to resync)
+    if (isReconnection) {
+      state.heartbeat.firstPing = now;
+      log("Grace period reactivated for " + (CONFIG.HEARTBEAT_GRACE_PERIOD / 1000) + "s (allows Pro3EM to resync)");
+      publishEvent("heartbeat_restored", {});
+      cancelEmergencyShutdown();
+    } else if (isFirstConnection) {
+      // First connection - publish initial state
+      publishRegularStates();
+    }
+  }
+
+  // Build response with relay states
+  let relayStates = {};
+  for (let i = 0; i < CONFIG.RELAYS.length; i++) {
+    let relayId = CONFIG.RELAYS[i];
+    relayStates["relay" + relayId] = state.relays[relayId].on;
+  }
+
+  // Calculate uptime
+  let uptimeSeconds = Math.floor((now - state.startTime) / 1000);
+
+  // Send response
+  response.code = 200;
+  response.headers = [["Content-Type", "application/json"]];
+  response.body = JSON.stringify({
+    status: "ok",
+    version: CONFIG.VERSION,
+    timestamp: now,
+    uptime_seconds: uptimeSeconds,
+    emergency_mode: state.emergencyShutdown.active,
+    relays: relayStates
+  });
+  response.send();
+
+  log("Heartbeat received from Pro3EM");
+}
+
+// Check if heartbeat timeout has elapsed
+function checkHeartbeatTimeout() {
+  // Skip check if we never received a heartbeat yet
+  if (state.heartbeat.lastPing === null) {
+    log("Waiting for first heartbeat from Pro3EM...");
     return;
   }
 
-  state.heartbeatInProgress = true;
-  let url = buildRpcUrl("Shelly.GetStatus", "");
+  let now = Date.now();
+  let elapsed = now - state.heartbeat.lastPing;
 
-  // Safety timer: force reset heartbeatInProgress after 2x HTTP timeout
-  // This prevents infinite lockup if the HTTP callback is never called
-  let safetyTimeout = CONFIG.HTTP_TIMEOUT * 2;
-  let safetyTimer = Timer.set(safetyTimeout, false, function() {
-    if (state.heartbeatInProgress) {
-      logError("Heartbeat safety timeout triggered - callback never called");
-      state.heartbeatInProgress = false;
+  // Check if we're still in grace period (after startup or first connection)
+  if (state.heartbeat.firstPing !== null) {
+    let timeSinceFirst = now - state.heartbeat.firstPing;
+    if (timeSinceFirst < CONFIG.HEARTBEAT_GRACE_PERIOD) {
+      log("Grace period active (" + (timeSinceFirst / 1000).toFixed(1) + "s / " + (CONFIG.HEARTBEAT_GRACE_PERIOD / 1000) + "s) - heartbeat timeout check skipped");
+      return;
+    }
+  }
 
-      // Count as failure to prevent zombie accumulation
-      state.pro3em.consecutiveFailures++;
-      if (state.pro3em.consecutiveFailures >= CONFIG.MAX_CONSECUTIVE_FAILURES && state.pro3em.online === true) {
-        state.pro3em.online = false;
-        logError("💔 Pro 3EM is now OFFLINE (timeout)");
+  // Log periodic status for monitoring
+  if (state.heartbeat.online === true) {
+    log("Heartbeat OK (last received " + (elapsed / 1000).toFixed(1) + "s ago)");
+  }
 
-        if (!state.emergencyShutdownInProgress && !state.emergencyShutdownActive) {
-          emergencyShutdown();
-        }
+  if (elapsed > CONFIG.HEARTBEAT_TIMEOUT) {
+    // Heartbeat timeout - Pro3EM is offline
+    if (state.heartbeat.online === true) {
+      state.heartbeat.online = false;
+      logError("💔 Pro 3EM is now OFFLINE (heartbeat timeout: " + (elapsed / 1000).toFixed(1) + "s)");
+
+      // Trigger emergency shutdown
+      if (!state.emergencyShutdown.activationInProgress && !state.emergencyShutdown.active) {
+        emergencyShutdown();
       }
     }
-  });
-
-  Shelly.call("HTTP.GET", buildHttpGetParams(url), function(result, error_code, error_message) {
-    // Clear safety timer since callback was called
-    Timer.clear(safetyTimer);
-
-    // Capture wasOnline inside callback to avoid closure issues with overlapping heartbeats
-    let wasOnline = state.pro3em.online;
-
-    if (error_code !== 0 || !result || result.code !== 200) {
-      // Heartbeat failed = Pro 3EM is offline
-      state.pro3em.consecutiveFailures++;
-      let errorReason = error_code !== 0 ? error_message : "HTTP " + (result ? result.code : "no response");
-      log("Heartbeat failed (" + state.pro3em.consecutiveFailures + "/" + CONFIG.MAX_CONSECUTIVE_FAILURES + "): " + errorReason);
-
-      if (state.pro3em.consecutiveFailures >= CONFIG.MAX_CONSECUTIVE_FAILURES && wasOnline === true) {
-        state.pro3em.online = false;
-        logError("💔 Pro 3EM is now OFFLINE");
-
-        // Trigger emergency shutdown directly (now uses callback chaining, no collision risk)
-        if (!state.emergencyShutdownInProgress && !state.emergencyShutdownActive) {
-          emergencyShutdown();
-        } else {
-          log("Emergency shutdown already active or in progress, skipping trigger from heartbeat");
-        }
-      }
-    } else {
-      // Heartbeat succeeded = Pro 3EM is online
-      state.pro3em.consecutiveFailures = 0;
-
-      if (wasOnline !== true) {
-        // Was offline/unknown, now online (reconnection or first connection)
-        let isReconnection = wasOnline === false;
-        let isFirstConnection = wasOnline === null;
-        state.pro3em.online = true;
-        log("💚 Pro 3EM is now ONLINE" + (isReconnection ? " (reconnected)" : " (first connection)"));
-
-        if (isReconnection) {
-          publishEvent("heartbeat_restored", {});
-          cancelEmergencyShutdown();
-        } else if (isFirstConnection) {
-          // First connection - publish initial state
-          publishRegularStates();
-        }
-      }
-    }
-
-    // Release lock after all state updates are done
-    state.heartbeatInProgress = false;
-  });
+  }
 }
 
 // ============================================================================
@@ -334,7 +369,7 @@ function publishRelayState(relayId, relayOn) {
   let msg = createRPCMessage("NotifyState", {
     relay: relayId,
     active: relayOn,
-    emergency_mode: state.emergencyShutdownActive
+    emergency_mode: state.emergencyShutdown.active
   });
 
   publishMQTT("relay" + relayId + "/state", msg, true);
@@ -343,8 +378,8 @@ function publishRelayState(relayId, relayOn) {
 function publishRegularStates() {
   // Build status data
   let statusData = {
-    pro3em_online: state.pro3em.online,
-    emergency_shutdown: state.emergencyShutdownActive
+    pro3em_online: state.heartbeat.online,
+    emergency_shutdown: state.emergencyShutdown.active
   };
 
   // Add relay states and publish individual states
@@ -393,49 +428,7 @@ function publishEvent(eventType, data, specificTopic) {
 function handleStatusUpdate(msg) {
   if (!msg || !msg.component) return;
 
-  // Handle Ethernet status changes
-  if (msg.component === "eth") {
-    let ethData = msg.delta || msg.info;
-    if (ethData && ethData.ip !== undefined) {
-      let wasConnected = state.ethernetConnected;
-      let isConnected = ethData.ip !== null;
-
-      if (isConnected !== wasConnected) {
-        state.ethernetConnected = isConnected;
-
-        if (isConnected) {
-          log("🌐 Ethernet CONNECTED - starting heartbeat");
-          // Reset failure count to allow immediate heartbeat
-          state.pro3em.consecutiveFailures = 0;
-          // Start periodic heartbeat if not already running
-          if (state.heartbeatTimerId === null) {
-            sendHeartbeat();  // Immediate heartbeat
-            state.heartbeatTimerId = Timer.set(CONFIG.HEARTBEAT_INTERVAL, true, sendHeartbeat);
-          }
-        } else {
-          log("🌐 Ethernet DISCONNECTED - stopping heartbeat");
-          // Stop periodic heartbeat to prevent zombie accumulation
-          if (state.heartbeatTimerId !== null) {
-            Timer.clear(state.heartbeatTimerId);
-            state.heartbeatTimerId = null;
-          }
-
-          // Pro 3EM is unreachable without network - mark offline and trigger emergency shutdown
-          if (state.pro3em.online === true) {
-            state.pro3em.online = false;
-            logError("💔 Pro 3EM is now OFFLINE (no network)");
-
-            if (!state.emergencyShutdownInProgress && !state.emergencyShutdownActive) {
-              emergencyShutdown();
-            }
-          }
-        }
-      }
-    }
-    return;
-  }
-
-  // Handle Switch status updates
+  // Handle Switch status updates only
   if (msg.component.indexOf("switch:") !== 0) return;
 
   // Extract relay ID from component name (e.g., "switch:0" -> 0)
@@ -481,10 +474,11 @@ let header = "\n" +
              "==============================================\n" +
              "  PRO 3 SAFETY PROTECTION\n" +
              "==============================================\n" +
-             "Pro 3EM IP: " + CONFIG.PRO3EM_IP + "\n" +
              "Monitored relays: " + CONFIG.RELAYS.length + "\n" +
-             "Heartbeat interval: " + (CONFIG.HEARTBEAT_INTERVAL / 1000) + "s\n" +
-             "Max consecutive failures: " + CONFIG.MAX_CONSECUTIVE_FAILURES + "\n" +
+             "Heartbeat timeout: " + (CONFIG.HEARTBEAT_TIMEOUT / 1000) + "s\n" +
+             "Grace period: " + (CONFIG.HEARTBEAT_GRACE_PERIOD / 1000) + "s\n" +
+             "Check interval: " + (CONFIG.HEARTBEAT_CHECK_INTERVAL / 1000) + "s\n" +
+             "HTTPServer endpoint: /script/1/heartbeat\n" +
              "MQTT: " + (CONFIG.MQTT_ENABLED ? "Enabled (prefix: " + CONFIG.MQTT_TOPIC_PREFIX + ")" : "Disabled") + "\n" +
              "==============================================\n";
 print(header);
@@ -494,20 +488,13 @@ log("[OK] Safety protection active!");
 // Fetch initial relay states
 fetchRelayStates();
 
-// Check Ethernet status before starting heartbeat
-Shelly.call("Eth.GetStatus", {}, function(result, error_code) {
-  if (error_code === 0 && result && result.ip !== null) {
-    // Ethernet is connected - start heartbeat
-    state.ethernetConnected = true;
-    sendHeartbeat();  // Initial heartbeat
-    state.heartbeatTimerId = Timer.set(CONFIG.HEARTBEAT_INTERVAL, true, sendHeartbeat);
-    log("Ethernet connected - HTTP heartbeat started (every " + (CONFIG.HEARTBEAT_INTERVAL/1000) + "s)");
-  } else {
-    // Ethernet not connected - heartbeat will start when connection detected
-    state.ethernetConnected = false;
-    log("Ethernet not connected - heartbeat will start when connection is established");
-  }
-});
+// Register HTTPServer endpoint for heartbeat
+HTTPServer.registerEndpoint("heartbeat", handleHeartbeat);
+log("HTTPServer endpoint registered: /script/1/heartbeat");
+
+// Start periodic heartbeat check timer
+state.heartbeat.timerId = Timer.set(CONFIG.HEARTBEAT_CHECK_INTERVAL, true, checkHeartbeatTimeout);
+log("Heartbeat monitoring started (check every " + (CONFIG.HEARTBEAT_CHECK_INTERVAL/1000) + "s, timeout: " + (CONFIG.HEARTBEAT_TIMEOUT/1000) + "s)");
 
 // 📡 Setup MQTT periodic publication
 if (CONFIG.MQTT_ENABLED) {
@@ -516,6 +503,6 @@ if (CONFIG.MQTT_ENABLED) {
   logMQTT("Initial states will be published on first successful heartbeat");
 }
 
-// Register status handler for switch updates
+// Register status handler for relay state changes
 Shelly.addStatusHandler(handleStatusUpdate);
-log("Status handler registered for switch updates");
+log("Status handler registered for relay state changes");
