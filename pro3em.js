@@ -57,7 +57,8 @@ let CONFIG = {
 
   // 🔌 PRO 3 CONNECTION
   HEARTBEAT_INTERVAL: 10000,        // Heartbeat check every 10s
-  MAX_CONSECUTIVE_FAILURES: 1       // Mark offline after 1 failed heartbeat
+  MAX_CONSECUTIVE_FAILURES: 1,      // Mark offline after 1 failed heartbeat
+  HTTP_TIMEOUT: 5000                // HTTP request timeout (5s)
 };
 
 // ============================================================================
@@ -67,7 +68,10 @@ let CONFIG = {
 let state = {
   phases: {},                       // Initialized by init()
   pro3: {},                         // Initialized by init()
-  heartbeatInProgress: false        // Guard to prevent concurrent heartbeats
+  heartbeatInProgress: false,       // Guard to prevent concurrent heartbeats
+  syncInProgress: false,            // Guard to prevent concurrent sync operations
+  heartbeatTimerId: null,           // ID of periodic heartbeat timer (to stop/restart it)
+  ethernetConnected: false          // Ethernet connection state
 };
 
 // ============================================================================
@@ -119,6 +123,13 @@ function buildRpcUrl(method, params) {
   return "http://" + CONFIG.PRO3_IP + "/rpc/" + method + "?" + params;
 }
 
+function buildHttpGetParams(url) {
+  return {
+    url: url,
+    timeout: CONFIG.HTTP_TIMEOUT
+  };
+}
+
 function validateCurrent(value, phaseName) {
   // Return 0 if value is invalid (NaN, negative, or not a number)
   if (typeof value !== "number" || isNaN(value) || value < 0) {
@@ -128,7 +139,7 @@ function validateCurrent(value, phaseName) {
   return value;
 }
 
-function sendCommand(phaseName, action) {
+function sendCommand(phaseName, action, onComplete) {
   let isOn = (action === "on");
 
   // Log action
@@ -139,28 +150,32 @@ function sendCommand(phaseName, action) {
     // Check if Pro 3 is online before sending command
     if (!state.pro3.online) {
       logError("Cannot send command to " + phaseName + " - Pro 3 is OFFLINE");
+      if (onComplete) onComplete();
       return;
     }
 
     let relay = CONFIG.PHASES[phaseName].relayIndex;
     let url = buildRpcUrl("Switch.Set", "id=" + relay + "&on=" + isOn);
 
-    Shelly.call("HTTP.GET", {url: url}, function(_result, error_code, error_message) {
-      if (error_code !== 0) {
-        logError("Relay command " + phaseName + ": " + error_message);
+    Shelly.call("HTTP.GET", buildHttpGetParams(url), function(result, error_code, error_message) {
+      if (error_code !== 0 || !result || result.code !== 200) {
+        let errorReason = error_code !== 0 ? error_message : "HTTP " + (result ? result.code : "no response");
+        logError("Relay command " + phaseName + ": " + errorReason);
       } else {
         log("Command sent: " + phaseName + " -> " + action);
       }
+      if (onComplete) onComplete();
     });
   } else {
     log("SIMULATION: Would send " + action + " to " + phaseName);
+    if (onComplete) onComplete();
   }
 
   // Publish relay state on MQTT
   publishRelayState(phaseName, isOn);
 }
 
-function syncRelayState(phaseName) {
+function syncRelayState(phaseName, onComplete) {
   let phaseConfig = CONFIG.PHASES[phaseName];
   let phaseState = state.phases[phaseName];
   let relayIndex = phaseConfig.relayIndex;
@@ -169,26 +184,31 @@ function syncRelayState(phaseName) {
   // Query actual relay state
   let url = buildRpcUrl("Switch.GetStatus", "id=" + relayIndex);
 
-  Shelly.call("HTTP.GET", {url: url}, function(result, error_code, error_message) {
-    if (error_code !== 0) {
-      logError("SYNC: Failed to get relay " + phaseName + " status: " + error_message);
+  Shelly.call("HTTP.GET", buildHttpGetParams(url), function(result, error_code, error_message) {
+    if (error_code !== 0 || !result || result.code !== 200) {
+      let errorReason = error_code !== 0 ? error_message : "HTTP " + (result ? result.code : "no response");
+      logError("SYNC: Failed to get relay " + phaseName + " status: " + errorReason);
+      if (onComplete) onComplete();
       return;
     }
 
     // Parse the response to get actual relay state
-    let actualState = result && result.body ? JSON.parse(result.body).output : null;
+    let parsedBody = typeof result.body === "string" ? JSON.parse(result.body) : result.body;
+    let actualState = parsedBody ? parsedBody.output : null;
 
-    if (actualState === null) {
+    if (actualState === null || actualState === undefined) {
       logError("SYNC: Could not parse relay " + phaseName + " state");
+      if (onComplete) onComplete();
       return;
     }
 
     // Compare and sync if different
     if (actualState !== desiredState) {
-      log("SYNC: " + phaseName + " mismatch - actual: " + (actualState ? "ON" : "OFF") + ", desired: " + (desiredState ? "ON" : "OFF"));
-      sendCommand(phaseName, desiredState ? "on" : "off");
+      log("SYNC: " + phaseName + " mismatch - actual: " + (actualState ? "ON" : "OFF") + " [" + actualState + "], desired: " + (desiredState ? "ON" : "OFF") + " [" + desiredState + "]");
+      sendCommand(phaseName, desiredState ? "on" : "off", onComplete);
     } else {
       log("SYNC: " + phaseName + " is in sync (" + (actualState ? "ON" : "OFF") + ")");
+      if (onComplete) onComplete();
     }
   });
 }
@@ -198,12 +218,28 @@ function syncRelayStates() {
     return;
   }
 
+  // Prevent concurrent sync operations (important during network reconnection)
+  if (state.syncInProgress) {
+    log("SYNC: Already in progress, skipping");
+    return;
+  }
+
+  state.syncInProgress = true;
   log("SYNC: Starting relay synchronization...");
 
-  // Synchronize each phase's relay
-  for (let phaseName in CONFIG.PHASES) {
-    syncRelayState(phaseName);
-  }
+  // Chain callbacks to sync sequentially - NO TIMERS created!
+  let phaseNames = Object.keys(CONFIG.PHASES);
+
+  // Sync all phases in sequence
+  syncRelayState(phaseNames[0], function() {
+    syncRelayState(phaseNames[1], function() {
+      syncRelayState(phaseNames[2], function() {
+        // All done
+        state.syncInProgress = false;
+        log("SYNC: Completed");
+      });
+    });
+  });
 }
 
 function sendHeartbeat() {
@@ -220,14 +256,35 @@ function sendHeartbeat() {
   state.heartbeatInProgress = true;
   let url = buildRpcUrl("Shelly.GetStatus", "");
 
-  Shelly.call("HTTP.GET", {url: url}, function(_result, error_code, error_message) {
+  // Safety timer: force reset heartbeatInProgress after 2x HTTP timeout
+  // This prevents infinite lockup if the HTTP callback is never called
+  let safetyTimeout = CONFIG.HTTP_TIMEOUT * 2;
+  let safetyTimer = Timer.set(safetyTimeout, false, function() {
+    if (state.heartbeatInProgress) {
+      logError("Heartbeat safety timeout triggered - callback never called");
+      state.heartbeatInProgress = false;
+
+      // Count as failure to prevent zombie accumulation
+      state.pro3.consecutiveFailures++;
+      if (state.pro3.consecutiveFailures >= CONFIG.MAX_CONSECUTIVE_FAILURES && state.pro3.online) {
+        state.pro3.online = false;
+        logError("Pro 3 is now OFFLINE (timeout)");
+      }
+    }
+  });
+
+  Shelly.call("HTTP.GET", buildHttpGetParams(url), function(result, error_code, error_message) {
+    // Clear safety timer since callback was called
+    Timer.clear(safetyTimer);
+
     // Capture wasOnline inside callback to avoid closure issues with overlapping heartbeats
     let wasOnline = state.pro3.online;
 
-    if (error_code !== 0) {
+    if (error_code !== 0 || !result || result.code !== 200) {
       // Heartbeat failed = Pro 3 is offline
       state.pro3.consecutiveFailures++;
-      log("Heartbeat failed (" + state.pro3.consecutiveFailures + "/" + CONFIG.MAX_CONSECUTIVE_FAILURES + "): " + error_message);
+      let errorReason = error_code !== 0 ? error_message : "HTTP " + (result ? result.code : "no response");
+      log("Heartbeat failed (" + state.pro3.consecutiveFailures + "/" + CONFIG.MAX_CONSECUTIVE_FAILURES + "): " + errorReason);
 
       if (state.pro3.consecutiveFailures >= CONFIG.MAX_CONSECUTIVE_FAILURES && wasOnline) {
         state.pro3.online = false;
@@ -241,7 +298,13 @@ function sendHeartbeat() {
         // Was offline, now online (reconnection or first connection at startup)
         state.pro3.online = true;
         log("Pro 3 is now ONLINE - triggering relay synchronization");
-        syncRelayStates();
+
+        // Trigger sync directly (now uses callback chaining, no collision risk)
+        if (!state.syncInProgress) {
+          syncRelayStates();
+        } else {
+          log("SYNC: Already in progress, skipping trigger from heartbeat");
+        }
       }
       // else: already online, everything ok (no action needed)
     }
@@ -512,13 +575,64 @@ if (CONFIG.MQTT_ENABLED) {
 
 // 🔌 Start heartbeat monitoring and safety protection
 if (CONFIG.PRO3_IP) {
-  sendHeartbeat();  // Initial heartbeat (also checks connection)
-  Timer.set(CONFIG.HEARTBEAT_INTERVAL, true, sendHeartbeat);
-  log("Heartbeat + connection monitoring started (every " + (CONFIG.HEARTBEAT_INTERVAL/1000) + "s, max failures: " + CONFIG.MAX_CONSECUTIVE_FAILURES + ")");
+  // Check Ethernet status before starting heartbeat
+  Shelly.call("Eth.GetStatus", {}, function(result, error_code) {
+    if (error_code === 0 && result && result.ip !== null) {
+      // Ethernet is connected - start heartbeat
+      state.ethernetConnected = true;
+      sendHeartbeat();  // Initial heartbeat
+      state.heartbeatTimerId = Timer.set(CONFIG.HEARTBEAT_INTERVAL, true, sendHeartbeat);
+      log("Ethernet connected - HTTP heartbeat started (every " + (CONFIG.HEARTBEAT_INTERVAL/1000) + "s)");
+    } else {
+      // Ethernet not connected - heartbeat will start when connection detected
+      state.ethernetConnected = false;
+      log("Ethernet not connected - heartbeat will start when connection is established");
+    }
+  });
 } else {
   log("Simulation mode - heartbeat monitoring disabled");
 }
 
-// Register status handler (triggered on EM updates)
-Shelly.addStatusHandler(handleEMStatusUpdate);
-log("Status handler registered for EM:0 updates");
+// Register status handler (triggered on EM updates and network changes)
+Shelly.addStatusHandler(function(msg) {
+  // Handle EM status updates
+  handleEMStatusUpdate(msg);
+
+  // Handle Ethernet status changes
+  if (CONFIG.PRO3_IP && msg && msg.component === "eth") {
+    let ethData = msg.delta || msg.info;
+    if (ethData && ethData.ip !== undefined) {
+      let wasConnected = state.ethernetConnected;
+      let isConnected = ethData.ip !== null;
+
+      if (isConnected !== wasConnected) {
+        state.ethernetConnected = isConnected;
+
+        if (isConnected) {
+          log("🌐 Ethernet CONNECTED - starting heartbeat");
+          // Reset failure count to allow immediate heartbeat
+          state.pro3.consecutiveFailures = 0;
+          // Start periodic heartbeat if not already running
+          if (state.heartbeatTimerId === null) {
+            sendHeartbeat();  // Immediate heartbeat
+            state.heartbeatTimerId = Timer.set(CONFIG.HEARTBEAT_INTERVAL, true, sendHeartbeat);
+          }
+        } else {
+          log("🌐 Ethernet DISCONNECTED - stopping heartbeat");
+          // Stop periodic heartbeat to prevent zombie accumulation
+          if (state.heartbeatTimerId !== null) {
+            Timer.clear(state.heartbeatTimerId);
+            state.heartbeatTimerId = null;
+          }
+
+          // Pro 3 is unreachable without network - mark offline
+          if (state.pro3.online) {
+            state.pro3.online = false;
+            logError("Pro 3 is now OFFLINE (no network)");
+          }
+        }
+      }
+    }
+  }
+});
+log("Status handler registered for EM:0 updates and network changes");
