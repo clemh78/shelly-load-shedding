@@ -1,6 +1,5 @@
 /******************************************************************************
  * INTELLIGENT THREE-PHASE LOAD SHEDDING - Pro 3EM
- * Version: 1.3
  * Author: Clément
  *
  * Installation: Shelly Pro 3EM → Settings → Scripts → Add Script
@@ -14,8 +13,12 @@
 // ============================================================================
 
 let CONFIG = {
+  // Script version
+  VERSION: "1.4",
+
   // Network addresses (leave empty for simulation mode)
   PRO3_IP: "192.168.1.103",                // Set to Pro 3EM IP (e.g., "10.0.0.101") or leave empty for simulation
+  PRO3_SCRIPT_ID: 1,                       // Script ID on Pro 3 (HTTPServer endpoint is /script/{ID}/heartbeat)
 
   // ⚡ PHASE CONFIGURATION
   PHASES: {
@@ -254,7 +257,9 @@ function sendHeartbeat() {
   }
 
   state.heartbeatInProgress = true;
-  let url = buildRpcUrl("Shelly.GetStatus", "");
+
+  // Call Pro3's HTTPServer endpoint /heartbeat
+  let url = "http://" + CONFIG.PRO3_IP + "/script/" + CONFIG.PRO3_SCRIPT_ID + "/heartbeat";
 
   // Safety timer: force reset heartbeatInProgress after 2x HTTP timeout
   // This prevents infinite lockup if the HTTP callback is never called
