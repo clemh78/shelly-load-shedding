@@ -427,7 +427,7 @@ function publishHomeAssistantDiscovery() {
       value_template: "{{ not value_json.params.data.active }}",
       payload_on: "True",
       payload_off: "False",
-      device_class: "problem",
+      device_class: "tamper",
       device: deviceInfo,
       availability_topic: onlineTopic,
       payload_available: "true",
@@ -489,6 +489,17 @@ function publishHomeAssistantDiscovery() {
     unique_id: "load_shedder_pro3_online",
     state_topic: prefix + "/status",
     value_template: "{{ value_json.params.data.pro3_online | tojson }}",
+    payload_on: "true",
+    payload_off: "false",
+    device_class: "connectivity",
+    device: deviceInfo
+  });
+  
+  // 6. Binary sensor for Pro 3 EM online status
+  publishHADiscovery("binary_sensor/load_shedder/pro3em_online/config", {
+    name: "Pro3EM Online",
+    unique_id: "load_shedder_pro3em_online",
+    state_topic: onlineTopic,
     payload_on: "true",
     payload_off: "false",
     device_class: "connectivity",
