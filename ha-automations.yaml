@@ -4,39 +4,40 @@
 - id: load_shedding_notifications
   alias: "Délestage - Notification"
   trigger:
-    - platform: mqtt
-      topic: load-shedding-14335cc56020/events
-  condition:
-    - condition: template
-      value_template: >
-        {{ trigger.payload_json.params.data.action in
-           ['immediate_shedding', 'normal_shedding', 'restoration'] }}
+    - platform: state
+      entity_id:
+        - binary_sensor.load_shedder_l1_active
+        - binary_sensor.load_shedder_l2_active
+        - binary_sensor.load_shedder_l3_active
+      from: "off"
+      to: "on"
+      id: shedding
+    - platform: state
+      entity_id:
+        - binary_sensor.load_shedder_l1_active
+        - binary_sensor.load_shedder_l2_active
+        - binary_sensor.load_shedder_l3_active
+      from: "on"
+      to: "off"
+      id: restoration
   action:
     - service: notify.mobile_app_iphone_de_clement
       data:
         title: >
-          {% set action = trigger.payload_json.params.data.action %}
-          {% set phase = trigger.payload_json.params.data.phase %}
-          {% if action == 'immediate_shedding' %}
-            🚨 Délestage IMMÉDIAT - {{ phase }}
-          {% elif action == 'normal_shedding' %}
+          {% set phase = trigger.to_state.name %}
+          {% if trigger.id == 'shedding' %}
             ⚠️ Délestage - {{ phase }}
           {% else %}
             ✅ Restauration - {{ phase }}
           {% endif %}
         message: >
-          {% set d = trigger.payload_json.params.data %}
-          Courant: {{ d.current }} A
-          Status: {{ d.status }}
+          {% set p = trigger.to_state.object_id | replace('_active', '') %}
+          Courant: {{ states('sensor.load_shedder_' ~ p ~ '_current') }} A
+          Status: {{ states('sensor.load_shedder_' ~ p ~ '_status') }}
         data:
           priority: high
           ttl: 0
-          color: >
-            {% if 'shedding' in trigger.payload_json.params.data.action %}
-              red
-            {% else %}
-              green
-            {% endif %}
+          color: "{{ 'red' if trigger.id == 'shedding' else 'green' }}"
   mode: queued
   max: 10
 
@@ -118,8 +119,8 @@
   alias: "Délestage - Délesteur hors ligne"
   trigger:
     - platform: state
-      entity_id: sensor.load_shedder_l1_current
-      to: "unavailable"
+      entity_id: binary_sensor.load_shedder_pro3em_online
+      to: "off"
       for:
         seconds: 30
   action:
@@ -127,7 +128,7 @@
       data:
         title: "🚨 Délesteur hors ligne"
         message: >
-          Le Shelly Pro 3EM (délesteur) ne publie plus de données depuis 30s.
+          Le Shelly Pro 3EM (délesteur) ne répond plus depuis 30s.
           Le système de délestage est inactif.
         data:
           priority: high
@@ -142,11 +143,9 @@
   alias: "Délestage - Délesteur en ligne"
   trigger:
     - platform: state
-      entity_id: sensor.load_shedder_l1_current
-      from: "unavailable"
-  condition:
-    - condition: template
-      value_template: "{{ trigger.to_state.state not in ['unknown', 'unavailable'] }}"
+      entity_id: binary_sensor.load_shedder_pro3em_online
+      from: "off"
+      to: "on"
   action:
     - service: notify.mobile_app_iphone_de_clement
       data:
