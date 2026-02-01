@@ -56,7 +56,6 @@ let CONFIG = {
   // 📡 MQTT
   MQTT_ENABLED: true,         // Enable MQTT publishing
   MQTT_TOPIC_PREFIX: "load-shedding-14335cc56020",  // MQTT topic prefix
-  MQTT_PUBLISH_INTERVAL: 30000,     // Publish states every 30s
 
   // 🔌 PRO 3 CONNECTION
   // CRITICAL: Pro3EM must detect offline BEFORE Pro3 triggers emergency shutdown
@@ -258,6 +257,7 @@ function sendHeartbeat() {
         for (let phaseName in state.phases) {
           state.phases[phaseName].relay_status = "unknown";
         }
+        publishRegularStates();
       }
     }
   });
@@ -308,6 +308,9 @@ function sendHeartbeat() {
       }
       // else: already online, everything ok (no action needed)
     }
+
+    // Publish states after every heartbeat (success or failure)
+    publishRegularStates();
 
     // Release lock after all state updates are done
     state.heartbeatInProgress = false;
@@ -377,6 +380,8 @@ function publishRegularStates() {
     // Add to global status
     let phaseKey = phaseName.toLowerCase();
     statusData[phaseKey + "_active"] = phaseState.active;
+    statusData[phaseKey + "_relay_status"] = phaseState.relay_status;
+    statusData[phaseKey + "_current"] = phaseState.current;
     statusData[phaseKey + "_status"] = phaseState.status;
   }
 
@@ -385,7 +390,7 @@ function publishRegularStates() {
 
   // Publish global status
   let msg = createRPCMessage("NotifyStatus", statusData);
-  publishMQTT("status", msg, false);
+  publishMQTT("status", msg, true);
 
   logMQTT("Regular states published");
 }
@@ -465,9 +470,9 @@ function publishHomeAssistantDiscovery() {
     name: "Load Shedder Pro3 Online",
     unique_id: "load_shedder_pro3_online",
     state_topic: prefix + "/status",
-    value_template: "{{ value_json.params.data.pro3_online }}",
-    payload_on: true,
-    payload_off: false,
+    value_template: "{{ value_json.params.data.pro3_online | tojson }}",
+    payload_on: "true",
+    payload_off: "false",
     device_class: "connectivity",
     device: deviceInfo
   });
@@ -660,8 +665,6 @@ if (CONFIG.MQTT_ENABLED) {
   publishHomeAssistantDiscovery();
   publishRegularStates();
   logMQTT("Initial states published");
-  Timer.set(CONFIG.MQTT_PUBLISH_INTERVAL, true, publishRegularStates);
-  log("MQTT state publication every " + (CONFIG.MQTT_PUBLISH_INTERVAL/1000) + "s");
 }
 
 // 🔌 Start heartbeat monitoring and safety protection
@@ -725,6 +728,7 @@ Shelly.addStatusHandler(function(msg) {
             for (let phaseName in state.phases) {
               state.phases[phaseName].relay_status = "unknown";
             }
+            publishRegularStates();
           }
         }
       }
