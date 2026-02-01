@@ -29,7 +29,7 @@
 
 let CONFIG = {
   // Script version
-  VERSION: "1.4",
+  VERSION: "1.5",
 
   // 🔒 SAFETY SETTINGS
   // CRITICAL: Pro3EM must detect offline BEFORE Pro3 triggers emergency shutdown
