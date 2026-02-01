@@ -31,9 +31,9 @@
             ✅ Restauration - {{ phase }}
           {% endif %}
         message: >
-          {% set p = trigger.to_state.object_id | replace('_active', '') %}
-          Courant: {{ states('sensor.load_shedder_' ~ p ~ '_current') }} A
-          Status: {{ states('sensor.load_shedder_' ~ p ~ '_status') }}
+          {% set base = trigger.to_state.object_id | replace('_active', '') %}
+          Courant: {{ states('sensor.' ~ base ~ '_current') }} A
+          Status: {{ states('sensor.' ~ base ~ '_status') }}
         data:
           priority: high
           ttl: 0
@@ -85,35 +85,7 @@
   mode: single
 
 # ===========================================================================
-# 4. Résumé quotidien des délestages
-# ===========================================================================
-- id: load_shedding_daily_summary
-  alias: "Délestage - Résumé quotidien"
-  trigger:
-    - platform: time
-      at: "22:00:00"
-  action:
-    - service: notify.mobile_app_iphone_de_clement
-      data:
-        title: "📊 Résumé délestage"
-        message: >
-          {% set phases = ['l1', 'l2', 'l3'] %}
-          {% set ns = namespace(any_issue=false) %}
-          {% for p in phases %}
-            {% set active = states('binary_sensor.load_shedder_' ~ p ~ '_active') %}
-            {% set current = states('sensor.load_shedder_' ~ p ~ '_current') %}
-            {% set status = states('sensor.load_shedder_' ~ p ~ '_status') %}
-            {{ p | upper }}: {{ current }}A - {{ status }}{% if active == 'on' %} ⚠️ DÉLESTÉ{% endif %}
-            {% if active == 'on' %}{% set ns.any_issue = true %}{% endif %}
-          {% endfor %}
-          Pro 3: {{ 'En ligne ✅' if is_state('binary_sensor.load_shedder_pro3_online', 'on') else 'Hors ligne ❌' }}
-          {% if not ns.any_issue %}
-          ✅ Aucun délestage actif.
-          {% endif %}
-  mode: single
-
-# ===========================================================================
-# 5. Alerte Délesteur (Pro 3EM) hors ligne
+# 4. Alerte Délesteur (Pro 3EM) hors ligne
 # ===========================================================================
 - id: load_shedding_pro3em_offline
   alias: "Délestage - Délesteur hors ligne"
@@ -137,7 +109,7 @@
   mode: single
 
 # ===========================================================================
-# 6. Alerte Délesteur (Pro 3EM) de retour en ligne
+# 5. Alerte Délesteur (Pro 3EM) de retour en ligne
 # ===========================================================================
 - id: load_shedding_pro3em_online
   alias: "Délestage - Délesteur en ligne"

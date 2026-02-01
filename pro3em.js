@@ -422,12 +422,13 @@ function publishHomeAssistantDiscovery() {
     // 1. Binary sensor for shedding state
     publishHADiscovery("binary_sensor/load_shedder/" + phaseKey + "_active/config", {
       name: phaseName + " Shedding",
+      object_id: "load_shedder_" + phaseKey + "_active",
       unique_id: "load_shedder_active_" + phaseKey,
       state_topic: stateTopic,
       value_template: "{{ not value_json.params.data.active }}",
       payload_on: "True",
       payload_off: "False",
-      device_class: "tamper",
+      device_class: "problem",
       device: deviceInfo,
       availability_topic: onlineTopic,
       payload_available: "true",
@@ -437,6 +438,7 @@ function publishHomeAssistantDiscovery() {
     // 2. Sensor for current (A)
     publishHADiscovery("sensor/load_shedder/" + phaseKey + "_current/config", {
       name: phaseName + " Current",
+      object_id: "load_shedder_" + phaseKey + "_current",
       unique_id: "load_shedder_current_" + phaseKey,
       state_topic: stateTopic,
       value_template: "{{ value_json.params.data.current }}",
@@ -450,6 +452,7 @@ function publishHomeAssistantDiscovery() {
     // 3. Sensor for status
     publishHADiscovery("sensor/load_shedder/" + phaseKey + "_status/config", {
       name: phaseName + " Status",
+      object_id: "load_shedder_" + phaseKey + "_status",
       unique_id: "load_shedder_status_" + phaseKey,
       state_topic: stateTopic,
       value_template: "{{ value_json.params.data.status }}",
@@ -461,6 +464,7 @@ function publishHomeAssistantDiscovery() {
     // 4. Sensor for last shedding timestamp
     publishHADiscovery("sensor/load_shedder/" + phaseKey + "_last_shedding/config", {
       name: phaseName + " Last Shedding",
+      object_id: "load_shedder_" + phaseKey + "_last_shedding",
       unique_id: "load_shedder_last_shedding_" + phaseKey,
       state_topic: stateTopic,
       value_template: "{% set ts = value_json.params.data.last_shedding %}{{ (ts / 1000) | timestamp_utc if ts else None }}",
@@ -471,6 +475,7 @@ function publishHomeAssistantDiscovery() {
     // 5. Binary sensor for physical relay state
     publishHADiscovery("binary_sensor/load_shedder/" + phaseKey + "_relay/config", {
       name: phaseName + " Relay",
+      object_id: "load_shedder_" + phaseKey + "_relay",
       unique_id: "load_shedder_relay_status_" + phaseKey,
       state_topic: stateTopic,
       value_template: "{{ value_json.params.data.relay_status }}",
@@ -483,9 +488,10 @@ function publishHomeAssistantDiscovery() {
     });
   }
 
-  // 5. Binary sensor for Pro 3 online status
+  // 6. Binary sensor for Pro 3 online status
   publishHADiscovery("binary_sensor/load_shedder/pro3_online/config", {
     name: "Pro3 Online",
+    object_id: "load_shedder_pro3_online",
     unique_id: "load_shedder_pro3_online",
     state_topic: prefix + "/status",
     value_template: "{{ value_json.params.data.pro3_online | tojson }}",
@@ -494,10 +500,11 @@ function publishHomeAssistantDiscovery() {
     device_class: "connectivity",
     device: deviceInfo
   });
-  
-  // 6. Sensor for shedding threshold (global)
+
+  // 7. Sensor for shedding threshold (global)
   publishHADiscovery("sensor/load_shedder/shedding_threshold/config", {
     name: "Shedding Threshold",
+    object_id: "load_shedder_shedding_threshold",
     unique_id: "load_shedder_shedding_threshold",
     state_topic: prefix + "/status",
     value_template: "{{ value_json.params.data.shedding_threshold }}",
@@ -508,9 +515,10 @@ function publishHomeAssistantDiscovery() {
     device: deviceInfo
   });
 
-  // 7. Sensor for restoration threshold (global)
+  // 8. Sensor for restoration threshold (global)
   publishHADiscovery("sensor/load_shedder/restoration_threshold/config", {
     name: "Restoration Threshold",
+    object_id: "load_shedder_restoration_threshold",
     unique_id: "load_shedder_restoration_threshold",
     state_topic: prefix + "/status",
     value_template: "{{ value_json.params.data.restoration_threshold }}",
@@ -521,9 +529,10 @@ function publishHomeAssistantDiscovery() {
     device: deviceInfo
   });
 
-  // 8. Binary sensor for Pro 3 EM online status
+  // 9. Binary sensor for Pro 3 EM online status
   publishHADiscovery("binary_sensor/load_shedder/pro3em_online/config", {
     name: "Pro3EM Online",
+    object_id: "load_shedder_pro3em_online",
     unique_id: "load_shedder_pro3em_online",
     state_topic: onlineTopic,
     payload_on: "true",
@@ -532,9 +541,10 @@ function publishHomeAssistantDiscovery() {
     device: deviceInfo
   });
 
-  // 9. Sensor for Pro3EM script version
+  // 10. Sensor for Pro3EM script version
   publishHADiscovery("sensor/load_shedder/pro3em_version/config", {
     name: "Pro3EM Script version",
+    object_id: "load_shedder_pro3em_version",
     unique_id: "load_shedder_pro3em_version",
     state_topic: prefix + "/status",
     value_template: "{{ value_json.params.data.pro3em_version }}",
@@ -543,9 +553,10 @@ function publishHomeAssistantDiscovery() {
     device: deviceInfo
   });
 
-  // 10. Sensor for Pro3 script version
+  // 11. Sensor for Pro3 script version
   publishHADiscovery("sensor/load_shedder/pro3_version/config", {
     name: "Pro3 Script version",
+    object_id: "load_shedder_pro3_version",
     unique_id: "load_shedder_pro3_version",
     state_topic: prefix + "/status",
     value_template: "{{ value_json.params.data.pro3_version }}",
