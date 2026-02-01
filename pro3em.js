@@ -349,7 +349,8 @@ function publishPhaseState(phaseName) {
     active: phaseState.active,
     relay_status: phaseState.relay_status,
     current: phaseState.current,
-    status: phaseState.status
+    status: phaseState.status,
+    last_shedding: phaseState.lastShedding || null
   });
 
   publishMQTT(phaseName + "/state", msg, true);
@@ -383,6 +384,7 @@ function publishRegularStates() {
     statusData[phaseKey + "_relay_status"] = phaseState.relay_status;
     statusData[phaseKey + "_current"] = phaseState.current;
     statusData[phaseKey + "_status"] = phaseState.status;
+    statusData[phaseKey + "_last_shedding"] = phaseState.lastShedding || null;
   }
 
   // Add Pro 3 online status
@@ -411,14 +413,15 @@ function publishHomeAssistantDiscovery() {
   };
 
   let prefix = CONFIG.MQTT_TOPIC_PREFIX;
+  let onlineTopic = Shelly.getDeviceInfo().id + "/online";
 
   for (let phaseName in CONFIG.PHASES) {
     let phaseKey = phaseName.toLowerCase();
     let stateTopic = prefix + "/" + phaseName + "/state";
 
-    // 1. Binary sensor for active state (shedding logic controlled)
+    // 1. Binary sensor for shedding state
     publishHADiscovery("binary_sensor/load_shedder/" + phaseKey + "_active/config", {
-      name: "Load Shedder " + phaseName + " Active",
+      name: phaseName + " Shedding",
       unique_id: "load_shedder_active_" + phaseKey,
       state_topic: stateTopic,
       value_template: "{{ not value_json.params.data.active }}",
@@ -426,48 +429,63 @@ function publishHomeAssistantDiscovery() {
       payload_off: "False",
       device_class: "problem",
       device: deviceInfo,
-      availability_topic: prefix + "/status",
-      availability_template: "{{ 'online' if value_json.params.data.pro3_online else 'offline' }}"
+      availability_topic: onlineTopic,
+      payload_available: "true",
+      payload_not_available: "false"
     });
 
     // 2. Sensor for current (A)
     publishHADiscovery("sensor/load_shedder/" + phaseKey + "_current/config", {
-      name: "Load Shedder " + phaseName + " Current",
+      name: phaseName + " Current",
       unique_id: "load_shedder_current_" + phaseKey,
       state_topic: stateTopic,
       value_template: "{{ value_json.params.data.current }}",
       unit_of_measurement: "A",
       device_class: "current",
       state_class: "measurement",
+      expire_after: 30,
       device: deviceInfo
     });
 
     // 3. Sensor for status
     publishHADiscovery("sensor/load_shedder/" + phaseKey + "_status/config", {
-      name: "Load Shedder " + phaseName + " Status",
+      name: phaseName + " Status",
       unique_id: "load_shedder_status_" + phaseKey,
       state_topic: stateTopic,
       value_template: "{{ value_json.params.data.status }}",
       icon: "mdi:state-machine",
+      expire_after: 30,
       device: deviceInfo
     });
 
-    // 4. Binary sensor for physical relay state
+    // 4. Sensor for last shedding timestamp
+    publishHADiscovery("sensor/load_shedder/" + phaseKey + "_last_shedding/config", {
+      name: phaseName + " Last Shedding",
+      unique_id: "load_shedder_last_shedding_" + phaseKey,
+      state_topic: stateTopic,
+      value_template: "{% set ts = value_json.params.data.last_shedding %}{{ (ts / 1000) | timestamp_utc if ts else None }}",
+      device_class: "timestamp",
+      device: deviceInfo
+    });
+
+    // 5. Binary sensor for physical relay state
     publishHADiscovery("binary_sensor/load_shedder/" + phaseKey + "_relay/config", {
-      name: "Load Shedder " + phaseName + " Relay",
+      name: phaseName + " Relay",
       unique_id: "load_shedder_relay_status_" + phaseKey,
       state_topic: stateTopic,
       value_template: "{{ value_json.params.data.relay_status }}",
       payload_on: "on",
       payload_off: "off",
       device_class: "power",
-      device: deviceInfo
+      device: deviceInfo,
+      availability_topic: prefix + "/status",
+      availability_template: "{{ 'online' if value_json.params.data.pro3_online else 'offline' }}"
     });
   }
 
   // 5. Binary sensor for Pro 3 online status
   publishHADiscovery("binary_sensor/load_shedder/pro3_online/config", {
-    name: "Load Shedder Pro3 Online",
+    name: "Pro3 Online",
     unique_id: "load_shedder_pro3_online",
     state_topic: prefix + "/status",
     value_template: "{{ value_json.params.data.pro3_online | tojson }}",
