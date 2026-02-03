@@ -14,7 +14,7 @@
 
 let CONFIG = {
   // Script version
-  VERSION: "1.5",
+  VERSION: "1.6",
 
   // Network addresses (leave empty for simulation mode)
   PRO3_IP: "192.168.1.103",                // Set to Pro 3EM IP (e.g., "10.0.0.101") or leave empty for simulation
@@ -22,32 +22,19 @@ let CONFIG = {
 
   // ⚡ PHASE CONFIGURATION
   PHASES: {
-    L1: {
-      relayIndex: 0,
-      emField: "a_current",           // Field name in EM.GetStatus
-      sheddingThreshold: 28,          // 2A margin (uses 93% of rating)
-      restorationThreshold: 26        // 2A hysteresis
-    },
-    L2: {
-      relayIndex: 1,
-      emField: "b_current",
-      sheddingThreshold: 28,
-      restorationThreshold: 26
-    },
-    L3: {
-      relayIndex: 2,
-      emField: "c_current",
-      sheddingThreshold: 28,
-      restorationThreshold: 26
-    }
+    L1: { relayIndex: 0, emField: "a_current" },
+    L2: { relayIndex: 1, emField: "b_current" },
+    L3: { relayIndex: 2, emField: "c_current" }
   },
-  
+
+  // ⚡ THRESHOLDS (applied to all phases)
+  SHEDDING_THRESHOLD: 28,              // Shed above this (A) - 2A margin (93% of rating)
+  RESTORATION_THRESHOLD: 26,           // Restore below this (A) - 2A hysteresis
+  IMMEDIATE_SHEDDING_MULTIPLIER: 1.2,  // Immediate shedding at 120% of threshold
+
   // Timings
   SHEDDING_DELAY: 2000,         // 2s delay before shedding (circuit breaker tolerates peaks)
   RESTORATION_DELAY: 300000,    // 5min (300s) before restoring
-
-  // Thresholds
-  IMMEDIATE_SHEDDING_MULTIPLIER: 1.2,  // Immediate shedding at 120% of threshold
 
   // Debug mode
   DEBUG: true,
@@ -99,7 +86,8 @@ function init() {
   // Initialize Pro 3 connection state
   state.pro3 = {
     online: false,
-    consecutiveFailures: 0
+    consecutiveFailures: 0,
+    version: null                  // Pro 3 script version (from heartbeat response)
   };
 
   log("Phases initialized: " + Object.keys(state.phases).join(", "));
@@ -290,11 +278,19 @@ function sendHeartbeat() {
 
       // Update relay_status from heartbeat response
       let parsedBody = typeof result.body === "string" ? JSON.parse(result.body) : result.body;
-      if (parsedBody && parsedBody.relays) {
-        for (let phaseName in CONFIG.PHASES) {
-          let relayKey = "relay" + CONFIG.PHASES[phaseName].relayIndex;
-          if (parsedBody.relays[relayKey] !== undefined) {
-            state.phases[phaseName].relay_status = parsedBody.relays[relayKey] ? "on" : "off";
+      if (parsedBody) {
+        // Store Pro 3 script version
+        if (parsedBody.version) {
+          state.pro3.version = parsedBody.version;
+        }
+
+        // Update relay states
+        if (parsedBody.relays) {
+          for (let phaseName in CONFIG.PHASES) {
+            let relayKey = "relay" + CONFIG.PHASES[phaseName].relayIndex;
+            if (parsedBody.relays[relayKey] !== undefined) {
+              state.phases[phaseName].relay_status = parsedBody.relays[relayKey] ? "on" : "off";
+            }
           }
         }
       }
@@ -387,8 +383,12 @@ function publishRegularStates() {
     statusData[phaseKey + "_last_shedding"] = phaseState.lastShedding || null;
   }
 
-  // Add Pro 3 online status
+  // Add Pro 3 online status, versions, and global thresholds
   statusData.pro3_online = state.pro3.online;
+  statusData.pro3_version = state.pro3.version;
+  statusData.pro3em_version = CONFIG.VERSION;
+  statusData.shedding_threshold = CONFIG.SHEDDING_THRESHOLD;
+  statusData.restoration_threshold = CONFIG.RESTORATION_THRESHOLD;
 
   // Publish global status
   let msg = createRPCMessage("NotifyStatus", statusData);
@@ -422,12 +422,13 @@ function publishHomeAssistantDiscovery() {
     // 1. Binary sensor for shedding state
     publishHADiscovery("binary_sensor/load_shedder/" + phaseKey + "_active/config", {
       name: phaseName + " Shedding",
+      object_id: "load_shedder_" + phaseKey + "_active",
       unique_id: "load_shedder_active_" + phaseKey,
       state_topic: stateTopic,
       value_template: "{{ not value_json.params.data.active }}",
       payload_on: "True",
       payload_off: "False",
-      device_class: "tamper",
+      device_class: "problem",
       device: deviceInfo,
       availability_topic: onlineTopic,
       payload_available: "true",
@@ -437,6 +438,7 @@ function publishHomeAssistantDiscovery() {
     // 2. Sensor for current (A)
     publishHADiscovery("sensor/load_shedder/" + phaseKey + "_current/config", {
       name: phaseName + " Current",
+      object_id: "load_shedder_" + phaseKey + "_current",
       unique_id: "load_shedder_current_" + phaseKey,
       state_topic: stateTopic,
       value_template: "{{ value_json.params.data.current }}",
@@ -450,6 +452,7 @@ function publishHomeAssistantDiscovery() {
     // 3. Sensor for status
     publishHADiscovery("sensor/load_shedder/" + phaseKey + "_status/config", {
       name: phaseName + " Status",
+      object_id: "load_shedder_" + phaseKey + "_status",
       unique_id: "load_shedder_status_" + phaseKey,
       state_topic: stateTopic,
       value_template: "{{ value_json.params.data.status }}",
@@ -461,6 +464,7 @@ function publishHomeAssistantDiscovery() {
     // 4. Sensor for last shedding timestamp
     publishHADiscovery("sensor/load_shedder/" + phaseKey + "_last_shedding/config", {
       name: phaseName + " Last Shedding",
+      object_id: "load_shedder_" + phaseKey + "_last_shedding",
       unique_id: "load_shedder_last_shedding_" + phaseKey,
       state_topic: stateTopic,
       value_template: "{% set ts = value_json.params.data.last_shedding %}{{ (ts / 1000) | timestamp_utc if ts else None }}",
@@ -471,6 +475,7 @@ function publishHomeAssistantDiscovery() {
     // 5. Binary sensor for physical relay state
     publishHADiscovery("binary_sensor/load_shedder/" + phaseKey + "_relay/config", {
       name: phaseName + " Relay",
+      object_id: "load_shedder_" + phaseKey + "_relay",
       unique_id: "load_shedder_relay_status_" + phaseKey,
       state_topic: stateTopic,
       value_template: "{{ value_json.params.data.relay_status }}",
@@ -483,9 +488,10 @@ function publishHomeAssistantDiscovery() {
     });
   }
 
-  // 5. Binary sensor for Pro 3 online status
+  // 6. Binary sensor for Pro 3 online status
   publishHADiscovery("binary_sensor/load_shedder/pro3_online/config", {
     name: "Pro3 Online",
+    object_id: "load_shedder_pro3_online",
     unique_id: "load_shedder_pro3_online",
     state_topic: prefix + "/status",
     value_template: "{{ value_json.params.data.pro3_online | tojson }}",
@@ -494,15 +500,68 @@ function publishHomeAssistantDiscovery() {
     device_class: "connectivity",
     device: deviceInfo
   });
-  
-  // 6. Binary sensor for Pro 3 EM online status
+
+  // 7. Sensor for shedding threshold (global)
+  publishHADiscovery("sensor/load_shedder/shedding_threshold/config", {
+    name: "Shedding Threshold",
+    object_id: "load_shedder_shedding_threshold",
+    unique_id: "load_shedder_shedding_threshold",
+    state_topic: prefix + "/status",
+    value_template: "{{ value_json.params.data.shedding_threshold }}",
+    unit_of_measurement: "A",
+    device_class: "current",
+    icon: "mdi:arrow-collapse-up",
+    entity_category: "diagnostic",
+    device: deviceInfo
+  });
+
+  // 8. Sensor for restoration threshold (global)
+  publishHADiscovery("sensor/load_shedder/restoration_threshold/config", {
+    name: "Restoration Threshold",
+    object_id: "load_shedder_restoration_threshold",
+    unique_id: "load_shedder_restoration_threshold",
+    state_topic: prefix + "/status",
+    value_template: "{{ value_json.params.data.restoration_threshold }}",
+    unit_of_measurement: "A",
+    device_class: "current",
+    icon: "mdi:arrow-collapse-down",
+    entity_category: "diagnostic",
+    device: deviceInfo
+  });
+
+  // 9. Binary sensor for Pro 3 EM online status
   publishHADiscovery("binary_sensor/load_shedder/pro3em_online/config", {
     name: "Pro3EM Online",
+    object_id: "load_shedder_pro3em_online",
     unique_id: "load_shedder_pro3em_online",
     state_topic: onlineTopic,
     payload_on: "true",
     payload_off: "false",
     device_class: "connectivity",
+    device: deviceInfo
+  });
+
+  // 10. Sensor for Pro3EM script version
+  publishHADiscovery("sensor/load_shedder/pro3em_version/config", {
+    name: "Pro3EM Script version",
+    object_id: "load_shedder_pro3em_version",
+    unique_id: "load_shedder_pro3em_version",
+    state_topic: prefix + "/status",
+    value_template: "{{ value_json.params.data.pro3em_version }}",
+    icon: "mdi:tag",
+    entity_category: "diagnostic",
+    device: deviceInfo
+  });
+
+  // 11. Sensor for Pro3 script version
+  publishHADiscovery("sensor/load_shedder/pro3_version/config", {
+    name: "Pro3 Script version",
+    object_id: "load_shedder_pro3_version",
+    unique_id: "load_shedder_pro3_version",
+    state_topic: prefix + "/status",
+    value_template: "{{ value_json.params.data.pro3_version }}",
+    icon: "mdi:tag",
+    entity_category: "diagnostic",
     device: deviceInfo
   });
 
@@ -557,18 +616,17 @@ function logPhaseMeasurements(emData) {
 function checkPhase(phaseName, current) {
   let now = Date.now();
   let phaseState = state.phases[phaseName];
-  let phaseConfig = CONFIG.PHASES[phaseName];
 
   // Update current measurement
   phaseState.current = current;
 
   // ---- OVERLOAD DETECTION ----
-  if (current > phaseConfig.sheddingThreshold) {
+  if (current > CONFIG.SHEDDING_THRESHOLD) {
     // Start tracking overload time if not already tracking
     if (phaseState.overloadStartTime === null) {
       phaseState.overloadStartTime = now;
       phaseState.status = "CRITICAL";
-      log("OVERLOAD detected " + phaseName + ": " + current.toFixed(2) + "A > " + phaseConfig.sheddingThreshold + "A");
+      log("OVERLOAD detected " + phaseName + ": " + current.toFixed(2) + "A > " + CONFIG.SHEDDING_THRESHOLD + "A");
     }
 
     // Only shed if relay is still ON
@@ -580,7 +638,7 @@ function checkPhase(phaseName, current) {
     let shouldShed = false;
     let sheddingType = "";
 
-    if (current > phaseConfig.sheddingThreshold * CONFIG.IMMEDIATE_SHEDDING_MULTIPLIER) {
+    if (current > CONFIG.SHEDDING_THRESHOLD * CONFIG.IMMEDIATE_SHEDDING_MULTIPLIER) {
       // Immediate shedding if well above threshold
       shouldShed = true;
       sheddingType = "immediate";
@@ -613,10 +671,10 @@ function checkPhase(phaseName, current) {
     // ---- STATUS UPDATE OR RESTORATION ----
     if (phaseState.active) {
       // Relay is ON - update status based on current level
-      phaseState.status = current < phaseConfig.restorationThreshold ? "NORMAL" : "WARNING";
+      phaseState.status = current < CONFIG.RESTORATION_THRESHOLD ? "NORMAL" : "WARNING";
     } else {
       // Relay is OFF (SHED) - check for restoration
-      if (current < phaseConfig.restorationThreshold) {
+      if (current < CONFIG.RESTORATION_THRESHOLD) {
         let elapsed = now - phaseState.lastShedding;
 
         if (elapsed >= CONFIG.RESTORATION_DELAY) {
@@ -674,15 +732,8 @@ let header = "\n" +
              "==============================================\n";
 print(header);
 
-// Build thresholds info dynamically
-let thresholdsInfo = "";
-for (let phaseName in CONFIG.PHASES) {
-  let cfg = CONFIG.PHASES[phaseName];
-  thresholdsInfo += phaseName + ": shed=" + cfg.sheddingThreshold + "A, restore=" + cfg.restorationThreshold + "A\n";
-}
-
 let startMsg = (CONFIG.PRO3_IP ? "Pro 3 IP: " + CONFIG.PRO3_IP + "\n" : "") +
-               "Phase thresholds:\n" + thresholdsInfo +
+               "Thresholds: shed=" + CONFIG.SHEDDING_THRESHOLD + "A, restore=" + CONFIG.RESTORATION_THRESHOLD + "A\n" +
                "Restoration delay: " + (CONFIG.RESTORATION_DELAY/1000) + "s\n" +
                "MQTT: " + (CONFIG.MQTT_ENABLED ? "Enabled (prefix: " + CONFIG.MQTT_TOPIC_PREFIX + ")" : "Disabled") + "\n\n" +
                "[OK] System operational!\n";
