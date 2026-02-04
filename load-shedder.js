@@ -14,7 +14,7 @@
 
 let CONFIG = {
   // Script version
-  VERSION: "1.6",
+  VERSION: "1.7",
 
   // Network addresses (leave empty for simulation mode)
   PRO3_IP: "192.168.1.103",                // Set to Pro 3EM IP (e.g., "10.0.0.101") or leave empty for simulation
@@ -39,10 +39,12 @@ let CONFIG = {
   // Debug mode
   DEBUG: true,
   DEBUG_MQTT: false,                // Enable verbose MQTT logs (separate from DEBUG)
+  DRY_RUN: true,                   // Dry run mode: heartbeat works but relay commands are simulated
 
   // 📡 MQTT
   MQTT_ENABLED: true,         // Enable MQTT publishing
-  MQTT_TOPIC_PREFIX: "load-shedding-14335cc56020",  // MQTT topic prefix
+  // MQTT_TOPIC_PREFIX: "load-shedding-14335cc56020",  // MQTT topic prefix
+  MQTT_TOPIC_PREFIX: "load-shedding-dev",  // MQTT topic prefix for dev
 
   // 🔌 PRO 3 CONNECTION
   // CRITICAL: Pro3EM must detect offline BEFORE Pro3 triggers emergency shutdown
@@ -51,7 +53,9 @@ let CONFIG = {
   // Safety margin: ~15s
   HEARTBEAT_INTERVAL: 10000,        // Heartbeat check every 10s
   MAX_CONSECUTIVE_FAILURES: 1,      // Mark offline after 1 failed heartbeat
-  HTTP_TIMEOUT: 5000                // HTTP request timeout (5s)
+  HTTP_TIMEOUT: 5000,               // HTTP request timeout (5s)
+
+  KV_STATS_KEY: "shedding_stats"
 };
 
 // ============================================================================
@@ -60,38 +64,15 @@ let CONFIG = {
 
 let state = {
   phases: {},                       // Initialized by init()
-  pro3: {},                         // Initialized by init()
+  pro3: {                           // Pre-initialized to avoid race conditions at startup
+    online: false,
+    consecutiveFailures: 0,
+    version: null
+  },
   heartbeatInProgress: false,       // Guard to prevent concurrent heartbeats
   heartbeatTimerId: null,           // ID of periodic heartbeat timer (to stop/restart it)
   ethernetConnected: false          // Ethernet connection state
 };
-
-// ============================================================================
-// INITIALIZATION
-// ============================================================================
-
-function init() {
-  // Initialize phase states from CONFIG.PHASES
-  for (let phaseName in CONFIG.PHASES) {
-    state.phases[phaseName] = {
-      active: true,                  // true = ON, false = OFF
-      relay_status: "unknown",      // Actual relay state from Pro 3 heartbeat ("on", "off", "unknown")
-      status: "NORMAL",             // NORMAL | WARNING | CRITICAL | SHED
-      current: 0,                   // Last measured current (A)
-      overloadStartTime: null,      // Timestamp when overload started (null = no overload)
-      lastShedding: 0               // Timestamp of last shedding
-    };
-  }
-
-  // Initialize Pro 3 connection state
-  state.pro3 = {
-    online: false,
-    consecutiveFailures: 0,
-    version: null                  // Pro 3 script version (from heartbeat response)
-  };
-
-  log("Phases initialized: " + Object.keys(state.phases).join(", "));
-}
 
 // ============================================================================
 // UTILITY FUNCTIONS
@@ -133,11 +114,152 @@ function validateCurrent(value, phaseName) {
   return value;
 }
 
+function logPhaseMeasurements(emData) {
+  let measurements = [];
+
+  for (let phaseName in CONFIG.PHASES) {
+    let phaseConfig = CONFIG.PHASES[phaseName];
+    let phaseState = state.phases[phaseName];
+    let rawCurrent = emData[phaseConfig.emField];
+    let current = validateCurrent(rawCurrent !== undefined ? rawCurrent : 0, phaseName);
+
+    // Status indicator based on phase state (using booleans)
+    let indicator;
+    if (!phaseState.active) {
+      indicator = "[SHED]";
+    } else if (phaseState.overload) {
+      indicator = "[WARN]";
+    } else {
+      indicator = "[OK]";
+    }
+
+    // Build measurement with relay state
+    let relayState = phaseState.active ? "ON" : "OFF";
+    let measurement = indicator + phaseName + "=" + current.toFixed(2) + "A(" + relayState;
+
+    // Add restoration countdown if phase is shed
+    if (!phaseState.active && phaseState.lastShedding) {
+      let elapsed = Date.now() - phaseState.lastShedding;
+      let remaining = Math.floor((CONFIG.RESTORATION_DELAY - elapsed) / 1000);
+      if (remaining > 0) {
+        measurement += ",↻" + remaining + "s";
+      }
+    }
+
+    measurement += ")";
+    measurements.push(measurement);
+  }
+
+  log("Measurements: " + measurements.join("  "));
+}
+
+// ============================================================================
+// INITIALIZATION
+// ============================================================================
+
+function init(callback) {
+  // Initialize phase states from CONFIG.PHASES
+  for (let phaseName in CONFIG.PHASES) {
+    state.phases[phaseName] = {
+      active: true,                  // true = ON, false = OFF
+      relay_status: "unknown",      // Actual relay state from Pro 3 heartbeat ("on", "off", "unknown")
+      current: 0,                   // Last measured current (A)
+      overload: false,              // true = current > SHEDDING_THRESHOLD
+      overloadStartTime: null,      // Timestamp when overload started (null = no overload)
+      lastShedding: 0,              // Timestamp of last shedding
+      sheddingCount: 0              // Total number of sheddings (persisted in KV)
+    };
+  }
+
+  // 📦 Load persisted stats from KV store, then continue startup
+  loadStatsFromKV(initEthernetState(callback));
+}
+
+function initEthernetState(callback) {
+  if (CONFIG.PRO3_IP) {
+    // Check Ethernet status before starting heartbeat
+    Shelly.call("Eth.GetStatus", {}, function(result, error_code) {
+      if (error_code === 0 && result && result.ip !== null) {
+        // Ethernet is connected - start heartbeat
+        state.ethernetConnected = true;
+        log("Ethernet connected.");
+      } else {
+        // Ethernet not connected - heartbeat will start when connection detected
+        state.ethernetConnected = false;
+        log("Ethernet not connected.");
+      }
+      if (callback) callback();
+    });
+  }
+}
+
+// ============================================================================
+// KV STORE FUNCTIONS (Persistence)
+// ============================================================================
+
+function loadStatsFromKV(callback) {
+  Shelly.call("KVS.Get", { key: CONFIG.KV_STATS_KEY }, function(result, error_code) {
+    if (error_code === 0 && result && result.value) {
+      let stats = JSON.parse(result.value);
+      log("KV: Loaded stats from storage");
+
+      // Restore stats for each phase
+      for (let phaseName in stats) {
+        if (state.phases[phaseName]) {
+          if (stats[phaseName].sheddingCount !== undefined) {
+            state.phases[phaseName].sheddingCount = stats[phaseName].sheddingCount;
+          }
+          if (stats[phaseName].lastShedding !== undefined) {
+            state.phases[phaseName].lastShedding = stats[phaseName].lastShedding;
+          }
+          log("KV: " + phaseName + " - count=" + state.phases[phaseName].sheddingCount +
+              ", lastShedding=" + (state.phases[phaseName].lastShedding || "never"));
+        }
+      }
+    } else {
+      log("KV: No saved stats found (first run or reset)");
+    }
+    if (callback) callback();
+  });
+}
+
+function saveStatsToKV(callback) {
+  let stats = {};
+  for (let phaseName in state.phases) {
+    stats[phaseName] = {
+      sheddingCount: state.phases[phaseName].sheddingCount,
+      lastShedding: state.phases[phaseName].lastShedding
+    };
+  }
+
+  Shelly.call("KVS.Set", { key: CONFIG.KV_STATS_KEY, value: JSON.stringify(stats) }, function(result, error_code) {
+    if (error_code === 0) {
+      log("KV: Stats saved to storage");
+      if (callback) callback(true);
+    } else {
+      logError("KV: Failed to save stats");
+      if (callback) callback(false);
+    }
+  });
+}
+
+// ============================================================================
+// RELAY COMMAND
+// ============================================================================
+
 function sendCommand(phaseName, action, onComplete) {
   let isOn = (action === "on");
 
   // Log action
   log("ACTION: " + phaseName + " -> " + action.toUpperCase());
+
+  // DRY_RUN mode: simulate command without sending to relay
+  if (CONFIG.DRY_RUN) {
+    state.phases[phaseName].relay_status = isOn ? "on" : "off";
+    log("DRY_RUN: Would send " + action + " to " + phaseName + " (relay " + CONFIG.PHASES[phaseName].relayIndex + ")");
+    if (onComplete) onComplete();
+    return;
+  }
 
   // Send real command via RPC API if PRO3_IP is configured
   if (CONFIG.PRO3_IP) {
@@ -342,11 +464,12 @@ function publishPhaseState(phaseName) {
   let phaseState = state.phases[phaseName];
   let msg = createRPCMessage("NotifyState", {
     phase: phaseName,
-    active: phaseState.active,
+    overload: phaseState.overload,
+    shedding: !phaseState.active,
     relay_status: phaseState.relay_status,
     current: phaseState.current,
-    status: phaseState.status,
-    last_shedding: phaseState.lastShedding || null
+    last_shedding: phaseState.lastShedding || null,
+    shedding_count: phaseState.sheddingCount
   });
 
   publishMQTT(phaseName + "/state", msg, true);
@@ -357,8 +480,7 @@ function publishEvent(phaseName, action, current) {
     phase: phaseName,
     relay: CONFIG.PHASES[phaseName].relayIndex,
     action: action,
-    current: current ? current.toFixed(2) : null,
-    status: state.phases[phaseName].status
+    current: current ? current.toFixed(2) : null
   });
 
   publishMQTT("events", msg, false);
@@ -376,11 +498,12 @@ function publishRegularStates() {
 
     // Add to global status
     let phaseKey = phaseName.toLowerCase();
-    statusData[phaseKey + "_active"] = phaseState.active;
+    statusData[phaseKey + "_overload"] = phaseState.overload;
+    statusData[phaseKey + "_shedding"] = !phaseState.active;
     statusData[phaseKey + "_relay_status"] = phaseState.relay_status;
     statusData[phaseKey + "_current"] = phaseState.current;
-    statusData[phaseKey + "_status"] = phaseState.status;
     statusData[phaseKey + "_last_shedding"] = phaseState.lastShedding || null;
+    statusData[phaseKey + "_shedding_count"] = phaseState.sheddingCount;
   }
 
   // Add Pro 3 online status, versions, and global thresholds
@@ -397,221 +520,9 @@ function publishRegularStates() {
   logMQTT("Regular states published");
 }
 
-// Home Assistant Auto-Discovery Configuration
-function publishHADiscovery(topic, config) {
-  if (!CONFIG.MQTT_ENABLED) return;
-  MQTT.publish("homeassistant/" + topic, JSON.stringify(config), 0, true);
-}
-
-function publishHomeAssistantDiscovery() {
-  let deviceInfo = {
-    identifiers: ["load_shedder_" + Shelly.getDeviceInfo().id],
-    name: "Load Shedder",
-    model: "Custom Shelly",
-    manufacturer: "DIY",
-    sw_version: CONFIG.VERSION
-  };
-
-  let prefix = CONFIG.MQTT_TOPIC_PREFIX;
-  let onlineTopic = Shelly.getDeviceInfo().id + "/online";
-
-  for (let phaseName in CONFIG.PHASES) {
-    let phaseKey = phaseName.toLowerCase();
-    let stateTopic = prefix + "/" + phaseName + "/state";
-
-    // 1. Binary sensor for shedding state
-    publishHADiscovery("binary_sensor/load_shedder/" + phaseKey + "_active/config", {
-      name: phaseName + " Shedding",
-      object_id: "load_shedder_" + phaseKey + "_active",
-      unique_id: "load_shedder_active_" + phaseKey,
-      state_topic: stateTopic,
-      value_template: "{{ not value_json.params.data.active }}",
-      payload_on: "True",
-      payload_off: "False",
-      device_class: "problem",
-      device: deviceInfo,
-      availability_topic: onlineTopic,
-      payload_available: "true",
-      payload_not_available: "false"
-    });
-
-    // 2. Sensor for current (A)
-    publishHADiscovery("sensor/load_shedder/" + phaseKey + "_current/config", {
-      name: phaseName + " Current",
-      object_id: "load_shedder_" + phaseKey + "_current",
-      unique_id: "load_shedder_current_" + phaseKey,
-      state_topic: stateTopic,
-      value_template: "{{ value_json.params.data.current }}",
-      unit_of_measurement: "A",
-      device_class: "current",
-      state_class: "measurement",
-      expire_after: 30,
-      device: deviceInfo
-    });
-
-    // 3. Sensor for status
-    publishHADiscovery("sensor/load_shedder/" + phaseKey + "_status/config", {
-      name: phaseName + " Status",
-      object_id: "load_shedder_" + phaseKey + "_status",
-      unique_id: "load_shedder_status_" + phaseKey,
-      state_topic: stateTopic,
-      value_template: "{{ value_json.params.data.status }}",
-      icon: "mdi:state-machine",
-      expire_after: 30,
-      device: deviceInfo
-    });
-
-    // 4. Sensor for last shedding timestamp
-    publishHADiscovery("sensor/load_shedder/" + phaseKey + "_last_shedding/config", {
-      name: phaseName + " Last Shedding",
-      object_id: "load_shedder_" + phaseKey + "_last_shedding",
-      unique_id: "load_shedder_last_shedding_" + phaseKey,
-      state_topic: stateTopic,
-      value_template: "{% set ts = value_json.params.data.last_shedding %}{{ (ts / 1000) | timestamp_utc if ts else None }}",
-      device_class: "timestamp",
-      device: deviceInfo
-    });
-
-    // 5. Binary sensor for physical relay state
-    publishHADiscovery("binary_sensor/load_shedder/" + phaseKey + "_relay/config", {
-      name: phaseName + " Relay",
-      object_id: "load_shedder_" + phaseKey + "_relay",
-      unique_id: "load_shedder_relay_status_" + phaseKey,
-      state_topic: stateTopic,
-      value_template: "{{ value_json.params.data.relay_status }}",
-      payload_on: "on",
-      payload_off: "off",
-      device_class: "power",
-      device: deviceInfo,
-      availability_topic: prefix + "/status",
-      availability_template: "{{ 'online' if value_json.params.data.pro3_online else 'offline' }}"
-    });
-  }
-
-  // 6. Binary sensor for Pro 3 online status
-  publishHADiscovery("binary_sensor/load_shedder/pro3_online/config", {
-    name: "Pro3 Online",
-    object_id: "load_shedder_pro3_online",
-    unique_id: "load_shedder_pro3_online",
-    state_topic: prefix + "/status",
-    value_template: "{{ value_json.params.data.pro3_online | tojson }}",
-    payload_on: "true",
-    payload_off: "false",
-    device_class: "connectivity",
-    device: deviceInfo
-  });
-
-  // 7. Sensor for shedding threshold (global)
-  publishHADiscovery("sensor/load_shedder/shedding_threshold/config", {
-    name: "Shedding Threshold",
-    object_id: "load_shedder_shedding_threshold",
-    unique_id: "load_shedder_shedding_threshold",
-    state_topic: prefix + "/status",
-    value_template: "{{ value_json.params.data.shedding_threshold }}",
-    unit_of_measurement: "A",
-    device_class: "current",
-    icon: "mdi:arrow-collapse-up",
-    entity_category: "diagnostic",
-    device: deviceInfo
-  });
-
-  // 8. Sensor for restoration threshold (global)
-  publishHADiscovery("sensor/load_shedder/restoration_threshold/config", {
-    name: "Restoration Threshold",
-    object_id: "load_shedder_restoration_threshold",
-    unique_id: "load_shedder_restoration_threshold",
-    state_topic: prefix + "/status",
-    value_template: "{{ value_json.params.data.restoration_threshold }}",
-    unit_of_measurement: "A",
-    device_class: "current",
-    icon: "mdi:arrow-collapse-down",
-    entity_category: "diagnostic",
-    device: deviceInfo
-  });
-
-  // 9. Binary sensor for Pro 3 EM online status
-  publishHADiscovery("binary_sensor/load_shedder/pro3em_online/config", {
-    name: "Pro3EM Online",
-    object_id: "load_shedder_pro3em_online",
-    unique_id: "load_shedder_pro3em_online",
-    state_topic: onlineTopic,
-    payload_on: "true",
-    payload_off: "false",
-    device_class: "connectivity",
-    device: deviceInfo
-  });
-
-  // 10. Sensor for Pro3EM script version
-  publishHADiscovery("sensor/load_shedder/pro3em_version/config", {
-    name: "Pro3EM Script version",
-    object_id: "load_shedder_pro3em_version",
-    unique_id: "load_shedder_pro3em_version",
-    state_topic: prefix + "/status",
-    value_template: "{{ value_json.params.data.pro3em_version }}",
-    icon: "mdi:tag",
-    entity_category: "diagnostic",
-    device: deviceInfo
-  });
-
-  // 11. Sensor for Pro3 script version
-  publishHADiscovery("sensor/load_shedder/pro3_version/config", {
-    name: "Pro3 Script version",
-    object_id: "load_shedder_pro3_version",
-    unique_id: "load_shedder_pro3_version",
-    state_topic: prefix + "/status",
-    value_template: "{{ value_json.params.data.pro3_version }}",
-    icon: "mdi:tag",
-    entity_category: "diagnostic",
-    device: deviceInfo
-  });
-
-  log("Home Assistant auto-discovery published");
-}
-
 // ============================================================================
 // SHEDDING LOGIC
 // ============================================================================
-
-function logPhaseMeasurements(emData) {
-  let measurements = [];
-
-  for (let phaseName in CONFIG.PHASES) {
-    let phaseConfig = CONFIG.PHASES[phaseName];
-    let phaseState = state.phases[phaseName];
-    let rawCurrent = emData[phaseConfig.emField];
-    let current = validateCurrent(rawCurrent !== undefined ? rawCurrent : 0, phaseName);
-
-    // Status indicator based on phase state
-    let indicator;
-    if (phaseState.status === "SHED") {
-      indicator = "[SHED]";
-    } else if (phaseState.status === "CRITICAL") {
-      indicator = "[CRIT]";
-    } else if (phaseState.status === "WARNING") {
-      indicator = "[WARN]";
-    } else {
-      indicator = "[OK]";
-    }
-
-    // Build measurement with relay state and status
-    let relayState = phaseState.active ? "ON" : "OFF";
-    let measurement = indicator + phaseName + "=" + current.toFixed(2) + "A(" + relayState + "," + phaseState.status;
-
-    // Add restoration countdown if phase is shed and ready to restore
-    if (phaseState.status === "SHED") {
-      let elapsed = Date.now() - phaseState.lastShedding;
-      let remaining = Math.floor((CONFIG.RESTORATION_DELAY - elapsed) / 1000);
-      if (remaining > 0) {
-        measurement += ",↻" + remaining + "s";
-      }
-    }
-
-    measurement += ")";
-    measurements.push(measurement);
-  }
-
-  log("Measurements: " + measurements.join("  "));
-}
 
 function checkPhase(phaseName, current) {
   let now = Date.now();
@@ -619,13 +530,13 @@ function checkPhase(phaseName, current) {
 
   // Update current measurement
   phaseState.current = current;
+  phaseState.overload = current > CONFIG.SHEDDING_THRESHOLD;
 
   // ---- OVERLOAD DETECTION ----
   if (current > CONFIG.SHEDDING_THRESHOLD) {
     // Start tracking overload time if not already tracking
     if (phaseState.overloadStartTime === null) {
       phaseState.overloadStartTime = now;
-      phaseState.status = "CRITICAL";
       log("OVERLOAD detected " + phaseName + ": " + current.toFixed(2) + "A > " + CONFIG.SHEDDING_THRESHOLD + "A");
     }
 
@@ -654,7 +565,10 @@ function checkPhase(phaseName, current) {
       sendCommand(phaseName, "off");
       phaseState.active = false;
       phaseState.lastShedding = now;
-      phaseState.status = "SHED";
+      phaseState.sheddingCount++;
+
+      // Persist stats to KV store
+      saveStatsToKV();
 
       publishPhaseState(phaseName);
       publishEvent(phaseName, sheddingType + "_shedding", current);
@@ -668,11 +582,8 @@ function checkPhase(phaseName, current) {
       phaseState.overloadStartTime = null;
     }
 
-    // ---- STATUS UPDATE OR RESTORATION ----
-    if (phaseState.active) {
-      // Relay is ON - update status based on current level
-      phaseState.status = current < CONFIG.RESTORATION_THRESHOLD ? "NORMAL" : "WARNING";
-    } else {
+    // ---- RESTORATION CHECK ----
+    if (!phaseState.active) {
       // Relay is OFF (SHED) - check for restoration
       if (current < CONFIG.RESTORATION_THRESHOLD) {
         let elapsed = now - phaseState.lastShedding;
@@ -681,7 +592,6 @@ function checkPhase(phaseName, current) {
           log("RESTORATION " + phaseName + " (delay " + (CONFIG.RESTORATION_DELAY/1000) + "s elapsed)");
           sendCommand(phaseName, "on");
           phaseState.active = true;
-          phaseState.status = "NORMAL";
           phaseState.overloadStartTime = null;
 
           publishPhaseState(phaseName);
@@ -715,104 +625,75 @@ function handleEMStatusUpdate(msg) {
   logPhaseMeasurements(emData);
 }
 
+function handleETHStatusUpdate(msg) {
+  // Only process EM status updates (ignore other component updates)
+  if (!msg || !msg.component || msg.component !== "eth") return;
+
+  // Use delta if available, otherwise use full info
+  let emData = msg.delta || msg.info;
+  if (!emData) return;
+  if (ethData.ip == undefined) return;
+
+  let wasConnected = state.ethernetConnected;
+  let isConnected = ethData.ip !== null;
+
+  if (isConnected !== wasConnected) {
+    state.ethernetConnected = isConnected;
+
+    if (isConnected) {
+      log("🌐 Ethernet CONNECTED");
+      state.pro3.consecutiveFailures = 0;
+      startHeartbeat();
+    } else {
+      log("🌐 Ethernet DISCONNECTED");
+      stopHeartbeat();
+
+      // Pro 3 is unreachable without network - mark offline
+      if (state.pro3.online) {
+        state.pro3.online = false;
+        logError("Pro 3 is now OFFLINE (no network)");
+
+        // Reset relay_status to unknown for all phases
+        for (let phaseName in state.phases) {
+          state.phases[phaseName].relay_status = "unknown";
+        }
+        publishRegularStates();
+      }
+    }
+  }
+}
+
 // ============================================================================
 // STARTUP
 // ============================================================================
 
-// Initialize state
-init();
+function startHeartbeat() {
+  if (state.heartbeatTimerId !== null) return;
 
-let mode = CONFIG.PRO3_IP ? "PRODUCTION MODE" : "SIMULATION MODE";
-let header = "\n" +
-             "==============================================\n" +
-             "  INTELLIGENT THREE-PHASE LOAD SHEDDING\n" +
-             "==============================================\n" +
-             "MODE: " + mode + "\n" +
-             (CONFIG.PRO3_IP ? "-> Real commands sent to Pro 3EM\n" : "-> Simulation mode (no commands sent)\n") +
-             "==============================================\n";
-print(header);
+  sendHeartbeat();
+  state.heartbeatTimerId = Timer.set(CONFIG.HEARTBEAT_INTERVAL, true, sendHeartbeat);
+  log("HTTP heartbeat started (every " + (CONFIG.HEARTBEAT_INTERVAL/1000) + "s)");
 
-let startMsg = (CONFIG.PRO3_IP ? "Pro 3 IP: " + CONFIG.PRO3_IP + "\n" : "") +
-               "Thresholds: shed=" + CONFIG.SHEDDING_THRESHOLD + "A, restore=" + CONFIG.RESTORATION_THRESHOLD + "A\n" +
-               "Restoration delay: " + (CONFIG.RESTORATION_DELAY/1000) + "s\n" +
-               "MQTT: " + (CONFIG.MQTT_ENABLED ? "Enabled (prefix: " + CONFIG.MQTT_TOPIC_PREFIX + ")" : "Disabled") + "\n\n" +
-               "[OK] System operational!\n";
-
-log(startMsg);
-
-// 📡 Publish initial states on MQTT
-if (CONFIG.MQTT_ENABLED) {
-  publishHomeAssistantDiscovery();
-  publishRegularStates();
-  logMQTT("Initial states published");
-}
-
-// 🔌 Start heartbeat monitoring and safety protection
-if (CONFIG.PRO3_IP) {
-  // Check Ethernet status before starting heartbeat
-  Shelly.call("Eth.GetStatus", {}, function(result, error_code) {
-    if (error_code === 0 && result && result.ip !== null) {
-      // Ethernet is connected - start heartbeat
-      state.ethernetConnected = true;
-      sendHeartbeat();  // Initial heartbeat
-      state.heartbeatTimerId = Timer.set(CONFIG.HEARTBEAT_INTERVAL, true, sendHeartbeat);
-      log("Ethernet connected - HTTP heartbeat started (every " + (CONFIG.HEARTBEAT_INTERVAL/1000) + "s)");
-    } else {
-      // Ethernet not connected - heartbeat will start when connection detected
-      state.ethernetConnected = false;
-      log("Ethernet not connected - heartbeat will start when connection is established");
-    }
-  });
-} else {
-  log("Simulation mode - heartbeat monitoring disabled");
-}
-
-// Register status handler (triggered on EM updates and network changes)
-Shelly.addStatusHandler(function(msg) {
-  // Handle EM status updates
-  handleEMStatusUpdate(msg);
-
-  // Handle Ethernet status changes
-  if (CONFIG.PRO3_IP && msg && msg.component === "eth") {
-    let ethData = msg.delta || msg.info;
-    if (ethData && ethData.ip !== undefined) {
-      let wasConnected = state.ethernetConnected;
-      let isConnected = ethData.ip !== null;
-
-      if (isConnected !== wasConnected) {
-        state.ethernetConnected = isConnected;
-
-        if (isConnected) {
-          log("🌐 Ethernet CONNECTED - starting heartbeat");
-          // Reset failure count to allow immediate heartbeat
-          state.pro3.consecutiveFailures = 0;
-          // Start periodic heartbeat if not already running
-          if (state.heartbeatTimerId === null) {
-            sendHeartbeat();  // Immediate heartbeat
-            state.heartbeatTimerId = Timer.set(CONFIG.HEARTBEAT_INTERVAL, true, sendHeartbeat);
-          }
-        } else {
-          log("🌐 Ethernet DISCONNECTED - stopping heartbeat");
-          // Stop periodic heartbeat to prevent zombie accumulation
-          if (state.heartbeatTimerId !== null) {
-            Timer.clear(state.heartbeatTimerId);
-            state.heartbeatTimerId = null;
-          }
-
-          // Pro 3 is unreachable without network - mark offline
-          if (state.pro3.online) {
-            state.pro3.online = false;
-            logError("Pro 3 is now OFFLINE (no network)");
-
-            // Reset relay_status to unknown for all phases
-            for (let phaseName in state.phases) {
-              state.phases[phaseName].relay_status = "unknown";
-            }
-            publishRegularStates();
-          }
-        }
-      }
-    }
+  if (CONFIG.MQTT_ENABLED) {
+    publishRegularStates();
   }
+}
+
+function stopHeartbeat() {
+  if (state.heartbeatTimerId === null) return;
+
+  Timer.clear(state.heartbeatTimerId);
+  state.heartbeatTimerId = null;
+}
+
+init(function() {
+  if(state.ethernetConnected){
+    startHeartbeat();
+  }
+
+  Shelly.addStatusHandler(function(msg) {
+    handleEMStatusUpdate(msg);
+    handleETHStatusUpdate(mqg);
+  });
+  log("Status handler registered for EM:0 updates and network changes");
 });
-log("Status handler registered for EM:0 updates and network changes");
