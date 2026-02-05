@@ -105,13 +105,12 @@ function buildHttpGetParams(url) {
   };
 }
 
-function validateCurrent(value, phaseName) {
+function validateCurrent(value) {
   // Return 0 if value is invalid (NaN, negative, or not a number)
-  if (typeof value !== "number" || isNaN(value) || value < 0) {
-    logError("Invalid current value for " + phaseName + ": " + value);
-    return 0;
+  if (value === undefined || typeof value !== "number" || isNaN(value) || value < 0) {
+    return false;
   }
-  return value;
+  return true;
 }
 
 function logPhaseMeasurements(emData) {
@@ -121,7 +120,8 @@ function logPhaseMeasurements(emData) {
     let phaseConfig = CONFIG.PHASES[phaseName];
     let phaseState = state.phases[phaseName];
     let rawCurrent = emData[phaseConfig.emField];
-    let current = validateCurrent(rawCurrent !== undefined ? rawCurrent : 0, phaseName);
+    let valide = validateCurrent(rawCurrent);
+    let textCurrent = (valide) ? rawCurrent.toFixed(2) : "?";
 
     // Status indicator based on phase state (using booleans)
     let indicator;
@@ -135,7 +135,7 @@ function logPhaseMeasurements(emData) {
 
     // Build measurement with relay state
     let relayState = phaseState.active ? "ON" : "OFF";
-    let measurement = indicator + phaseName + "=" + current.toFixed(2) + "A(" + relayState;
+    let measurement = indicator + phaseName + "=" + textCurrent + "A(" + relayState;
 
     // Add restoration countdown if phase is shed
     if (!phaseState.active && phaseState.lastShedding) {
@@ -524,87 +524,127 @@ function publishRegularStates() {
 // SHEDDING LOGIC
 // ============================================================================
 
-function checkPhase(phaseName, current) {
-  let now = Date.now();
-  let phaseState = state.phases[phaseName];
-
-  // Update current measurement
-  phaseState.current = current;
-  phaseState.overload = current > CONFIG.SHEDDING_THRESHOLD;
+function computeSheedingDecision(active, current, overloadStartTime, lastShedding) {
+  let result = {
+    needShedding: false,
+    needRestoration: false,
+    sheddingType: "",
+  }
 
   // ---- OVERLOAD DETECTION ----
   if (current > CONFIG.SHEDDING_THRESHOLD) {
-    // Start tracking overload time if not already tracking
-    if (phaseState.overloadStartTime === null) {
-      phaseState.overloadStartTime = now;
-      log("OVERLOAD detected " + phaseName + ": " + current.toFixed(2) + "A > " + CONFIG.SHEDDING_THRESHOLD + "A");
-    }
+    if (!active) return result;
 
-    // Only shed if relay is still ON
-    if (!phaseState.active) return;
-
-    let overloadDuration = now - phaseState.overloadStartTime;
-
-    // Check if shedding is needed
-    let shouldShed = false;
-    let sheddingType = "";
-
+    let overloadDuration = Date.now() - overloadStartTime;
     if (current > CONFIG.SHEDDING_THRESHOLD * CONFIG.IMMEDIATE_SHEDDING_MULTIPLIER) {
       // Immediate shedding if well above threshold
-      shouldShed = true;
-      sheddingType = "immediate";
-      log("IMMEDIATE SHEDDING " + phaseName + " (overload > " + (CONFIG.IMMEDIATE_SHEDDING_MULTIPLIER * 100) + "%)");
+      result.needShedding = true;
+      result.sheddingType = "immediate";
     } else if (overloadDuration >= CONFIG.SHEDDING_DELAY) {
       // Normal shedding after delay
-      shouldShed = true;
-      sheddingType = "normal";
-      log("SHEDDING " + phaseName + " (overload for " + (overloadDuration/1000).toFixed(1) + "s)");
-    }
-
-    if (shouldShed) {
-      sendCommand(phaseName, "off");
-      phaseState.active = false;
-      phaseState.lastShedding = now;
-      phaseState.sheddingCount++;
-
-      // Persist stats to KV store
-      saveStatsToKV();
-
-      publishPhaseState(phaseName);
-      publishEvent(phaseName, sheddingType + "_shedding", current);
+      result.needShedding = true;
+      result.sheddingType = "normal";
     }
   }
   // ---- NO OVERLOAD ----
   else {
-    // Reset overload tracking only if relay is ON
-    if (phaseState.overloadStartTime !== null && phaseState.active) {
-      log("CANCEL overload tracking " + phaseName + " (current back to normal)");
-      phaseState.overloadStartTime = null;
-    }
-
     // ---- RESTORATION CHECK ----
-    if (!phaseState.active) {
+    if (!active) {
       // Relay is OFF (SHED) - check for restoration
       if (current < CONFIG.RESTORATION_THRESHOLD) {
-        let elapsed = now - phaseState.lastShedding;
+        let elapsed = now - lastShedding;
 
         if (elapsed >= CONFIG.RESTORATION_DELAY) {
-          log("RESTORATION " + phaseName + " (delay " + (CONFIG.RESTORATION_DELAY/1000) + "s elapsed)");
-          sendCommand(phaseName, "on");
-          phaseState.active = true;
-          phaseState.overloadStartTime = null;
-
-          publishPhaseState(phaseName);
-          publishEvent(phaseName, "restoration", current);
+          result.needRestoration = true;
         }
       }
     }
   }
+
+  return result;
+}
+
+function computeOverloadingDecision(overload, current){
+  let result = {
+    needOverload: false,
+    needEndOfOverload: false,
+  }
+
+  if(!overload && current > CONFIG.SHEDDING_THRESHOLD){
+    return result.needOverload;
+  }else if (phaseState.overload && current <= CONFIG.SHEDDING_THRESHOLD){
+    return result.needEndOfOverload;
+  }
+  return result;
 }
 
 // ============================================================================
 // MAIN CYCLE (triggered by status updates)
 // ============================================================================
+
+function startShedding(phaseName, sheddingType){
+  let phaseState = state.phases[phaseName];
+
+  if(!phaseState.active) return;
+
+  //sendCommand(phaseName, "off");
+
+  if(sheddingType === "immediate"){
+    log("IMMEDIATE SHEDDING " + phaseName + " (overload > " + (CONFIG.IMMEDIATE_SHEDDING_MULTIPLIER * 100) + "%)");
+  }else if(sheddingType === "normal"){
+    log("SHEDDING " + phaseName + " (overload for " + (overloadDuration/1000).toFixed(1) + "s)");
+  }
+
+  phaseState.active = false;
+  phaseState.lastShedding = now;
+  phaseState.sheddingCount++;
+
+  publishEvent(phaseName, sheddingType + "_shedding", phaseState.current);
+  publishPhaseState(phaseName);
+  saveStatsToKV();
+}
+
+function stopShedding(phaseName){
+  let phaseState = state.phases[phaseName];
+  
+  if(phaseState.active) return;
+
+  //sendCommand(phaseName, "on");
+
+  log("RESTORATION " + phaseName + " (delay " + (CONFIG.RESTORATION_DELAY/1000) + "s elapsed)");
+
+  phaseState.active = true;
+
+  publishEvent(phaseName, "restoration", phaseState.current);
+  publishPhaseState(phaseName);
+}
+
+function startOverload(phaseName){
+  let phaseState = state.phases[phaseName];
+  
+  if(phaseState.overload) return;
+
+  log("OVERLOAD detected " + phaseName + ": " + current.toFixed(2) + "A > " + CONFIG.SHEDDING_THRESHOLD + "A");
+
+  phaseState.overload = true;
+  phaseState.overloadStartTime = Date.now();
+
+  publishEvent(phaseName, "overload", phaseState.current);
+  publishPhaseState(phaseName);
+}
+
+function stopOverload(phaseName){
+  let phaseState = state.phases[phaseName];
+  
+  if(!phaseState.overload) return;
+
+  log("CANCEL overload tracking " + phaseName + " (current back to normal)");
+
+  phaseState.overload = false;
+  phaseState.overloadStartTime = null;
+
+  publishPhaseState(phaseName);
+}
 
 function handleEMStatusUpdate(msg) {
   // Only process EM status updates (ignore other component updates)
@@ -617,8 +657,29 @@ function handleEMStatusUpdate(msg) {
   // Check all phases
   for (let phaseName in CONFIG.PHASES) {
     let rawCurrent = emData[CONFIG.PHASES[phaseName].emField];
-    let current = validateCurrent(rawCurrent !== undefined ? rawCurrent : 0, phaseName);
-    checkPhase(phaseName, current);
+    let valide = validateCurrent(rawCurrent);
+    if(valide) {
+      let phaseState = state.phases[phaseName];
+      phaseState.current = current;
+
+      //COMPUTE OVERLOAD
+      let overloadDecision = computeOverloadingDecision(phaseState.overload, current);
+      if (overloadDecision.needOverload){        
+        startOverload(phaseName);
+      }else if (decisionResult.needEndOfOverload){
+        stopOverload(phaseName);
+      }
+
+      //COMPUTE DECISION
+      let sheedingDecision = computeSheedingDecision(phaseState.active, current, phaseState.overloadStartTime, phaseState.lastShedding);
+      if (sheedingDecision.needShedding){        
+        startShedding(phaseName, sheedingDecision.sheddingType);
+      }else if (sheedingDecision.needRestoration){
+        stopShedding(phaseName);
+      }
+    }else{
+      logError("Invalid current value for " + phaseName + ": " + value);
+    }
   }
 
   // Log measurements
