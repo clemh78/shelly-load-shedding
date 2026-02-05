@@ -602,7 +602,7 @@ function syncRelayStates() {
 // SHEDDING LOGIC
 // ============================================================================
 
-function computeSheeddingDecision(active, current, overloadStartTime, lastShedding) {
+function computeSheddingDecision(active, current, overloadStartTime, lastShedding) {
   let result = {
     needShedding: false,
     needRestoration: false,
@@ -650,9 +650,9 @@ function computeOverloadingDecision(overload, current){
   }
 
   if(!overload && current > CONFIG.SHEDDING_THRESHOLD){
-    result.needOverload;
+    result.needOverload = true;
   }else if (overload && current <= CONFIG.SHEDDING_THRESHOLD){
-    result.needEndOfOverload;
+    result.needEndOfOverload = true;
   }
   return result;
 }
@@ -686,14 +686,14 @@ function handleEMStatusUpdate(msg) {
       }
 
       //COMPUTE DECISION
-      let sheedingDecision = computeSheeddingDecision(phaseState.active, rawCurrent, phaseState.overloadStartTime, phaseState.lastShedding);
+      let sheedingDecision = computeSheddingDecision(phaseState.active, rawCurrent, phaseState.overloadStartTime, phaseState.lastShedding);
       if (sheedingDecision.needShedding){        
         startShedding(phaseName, sheedingDecision.sheddingType);
       }else if (sheedingDecision.needRestoration){
         stopShedding(phaseName);
       }
     }else{
-      logError("Invalid current value for " + phaseName + ": " + value);
+      logError("Invalid current value for " + phaseName + ": " + rawCurrent);
     }
   }
 
@@ -740,7 +740,7 @@ function handleHeartbeat() {
       }else if(result.errorCode === "safety_timeout"){
         logError("Heartbeat safety timeout triggered - callback never called");
       }else {
-        logError("Heartbeat failed (" + state.pro3.consecutiveFailures + "/" + CONFIG.MAX_CONSECUTIVE_FAILURES + "): " + result.errorReason);
+        logError("Heartbeat failed (" + state.pro3.consecutiveFailures + "/" + CONFIG.MAX_CONSECUTIVE_FAILURES + "): " + result.errorCode);
       }
 
       if (state.pro3.consecutiveFailures >= CONFIG.MAX_CONSECUTIVE_FAILURES && state.pro3.online) {
