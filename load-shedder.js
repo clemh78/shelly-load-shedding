@@ -256,7 +256,7 @@ function sendCommand(relayIndex, action, onComplete) {
 
   // Check if Pro 3 is online before sending command
   if (!state.pro3.online) {
-    logError("Cannot send command to " + phaseName + " - Pro 3 is OFFLINE");
+    logError("Cannot send command to " + relayIndex + " - Pro 3 is OFFLINE");
     if (onComplete) onComplete("unknown");
     return;
   }
@@ -270,7 +270,7 @@ function sendCommand(relayIndex, action, onComplete) {
       logError("Relay command " + relayIndex + ": " + errorReason);
       if (onComplete) onComplete("unknown");
     } else {
-      log("Command sent: " + phaseName + " -> " + action);
+      log("Command sent: " + relayIndex + " -> " + action);
       if (onComplete) onComplete(isOn ? "on" : "off");
     }
     return;
@@ -296,7 +296,7 @@ function sendHeartbeat(onComplete) {
   state.heartbeatInProgress = true;
 
   let safetyTimeout = CONFIG.HTTP_TIMEOUT * 2;
-  let safetyTimer = Timer.set(safetyTimeout, false, function(onComplete) {
+  let safetyTimer = Timer.set(safetyTimeout, false, function() {
     if (state.heartbeatInProgress) {
       state.heartbeatInProgress = false;
       if (onComplete) onComplete({success: false, errorCode: "safety_timeout", data: {}});
@@ -310,17 +310,16 @@ function sendHeartbeat(onComplete) {
 
     if (error_code !== 0 || !result || result.code !== 200) {
       let errorReason = error_code !== 0 ? error_message : "HTTP " + (result ? result.code : "no_response");
-      if (onComplete) onComplete({success: false, errorCode: errorReason, resultData: {}});
-      return;
+      if (onComplete) onComplete({success: false, errorCode: errorReason, data: {}});
     }else{
       let parsedBody = typeof result.body === "string" ? JSON.parse(result.body) : result.body;
       if (parsedBody) {
-        if (onComplete) onComplete({success: true, errorCode: null, resultData: parsedBody});
-        return;
+        if (onComplete) onComplete({success: true, errorCode: null, data: parsedBody});
       }
     }
 
     state.heartbeatInProgress = false;
+    return;
   });
 }
 
@@ -423,7 +422,7 @@ function powerOnRelay(phaseName, callback){
 
   if (CONFIG.DRY_RUN) {
     phaseState.relay_status = "on";
-    log("DRY_RUN: Would send " + action + " to " + phaseName + " (relay " + relayIndex + ")");
+    log("DRY_RUN: Would send ON to " + phaseName + " (relay " + relayIndex + ")");
     if (callback) callback();
     return;
   }else{
@@ -448,7 +447,7 @@ function powerOffRelay(phaseName, callback){
 
   if (CONFIG.DRY_RUN) {
     phaseState.relay_status = "off";
-    log("DRY_RUN: Would send " + action + " to " + phaseName + " (relay " + relayIndex + ")");
+    log("DRY_RUN: Would send OFF to " + phaseName + " (relay " + relayIndex + ")");
     if (callback) callback();
     return;
   }else{
@@ -469,11 +468,12 @@ function startShedding(phaseName, sheddingType){
     if(sheddingType === "immediate"){
       log("IMMEDIATE SHEDDING " + phaseName + " (overload > " + (CONFIG.IMMEDIATE_SHEDDING_MULTIPLIER * 100) + "%)");
     }else if(sheddingType === "normal"){
+      let overloadDuration = Date.now() - phaseState.overloadStartTime;
       log("SHEDDING " + phaseName + " (overload for " + (overloadDuration/1000).toFixed(1) + "s)");
     }
 
     phaseState.active = false;
-    phaseState.lastShedding = now;
+    phaseState.lastShedding = Date.now();
     phaseState.sheddingCount++;
 
     publishEvent(phaseName, sheddingType + "_shedding", phaseState.current);
@@ -502,7 +502,7 @@ function startOverload(phaseName){
   
   if(phaseState.overload) return;
 
-  log("OVERLOAD detected " + phaseName + ": " + current.toFixed(2) + "A > " + CONFIG.SHEDDING_THRESHOLD + "A");
+  log("OVERLOAD detected " + phaseName + ": " + phaseState.current.toFixed(2) + "A > " + CONFIG.SHEDDING_THRESHOLD + "A");
 
   phaseState.overload = true;
   phaseState.overloadStartTime = Date.now();
@@ -602,18 +602,19 @@ function syncRelayStates() {
 // SHEDDING LOGIC
 // ============================================================================
 
-function computeSheedingDecision(active, current, overloadStartTime, lastShedding) {
+function computeSheeddingDecision(active, current, overloadStartTime, lastShedding) {
   let result = {
     needShedding: false,
     needRestoration: false,
     sheddingType: "",
   }
+  let now = Date.now();
 
   // ---- OVERLOAD DETECTION ----
   if (current > CONFIG.SHEDDING_THRESHOLD) {
     if (!active) return result;
 
-    let overloadDuration = Date.now() - overloadStartTime;
+    let overloadDuration = now - overloadStartTime;
     if (current > CONFIG.SHEDDING_THRESHOLD * CONFIG.IMMEDIATE_SHEDDING_MULTIPLIER) {
       // Immediate shedding if well above threshold
       result.needShedding = true;
@@ -649,9 +650,9 @@ function computeOverloadingDecision(overload, current){
   }
 
   if(!overload && current > CONFIG.SHEDDING_THRESHOLD){
-    return result.needOverload;
-  }else if (phaseState.overload && current <= CONFIG.SHEDDING_THRESHOLD){
-    return result.needEndOfOverload;
+    result.needOverload;
+  }else if (overload && current <= CONFIG.SHEDDING_THRESHOLD){
+    result.needEndOfOverload;
   }
   return result;
 }
@@ -674,18 +675,18 @@ function handleEMStatusUpdate(msg) {
     let valide = validateCurrent(rawCurrent);
     if(valide) {
       let phaseState = state.phases[phaseName];
-      phaseState.current = current;
+      phaseState.current = rawCurrent;
 
       //COMPUTE OVERLOAD
-      let overloadDecision = computeOverloadingDecision(phaseState.overload, current);
+      let overloadDecision = computeOverloadingDecision(phaseState.overload, rawCurrent);
       if (overloadDecision.needOverload){        
         startOverload(phaseName);
-      }else if (decisionResult.needEndOfOverload){
+      }else if (overloadDecision.needEndOfOverload){
         stopOverload(phaseName);
       }
 
       //COMPUTE DECISION
-      let sheedingDecision = computeSheedingDecision(phaseState.active, current, phaseState.overloadStartTime, phaseState.lastShedding);
+      let sheedingDecision = computeSheeddingDecision(phaseState.active, rawCurrent, phaseState.overloadStartTime, phaseState.lastShedding);
       if (sheedingDecision.needShedding){        
         startShedding(phaseName, sheedingDecision.sheddingType);
       }else if (sheedingDecision.needRestoration){
@@ -705,8 +706,8 @@ function handleETHStatusUpdate(msg) {
   if (!msg || !msg.component || msg.component !== "eth") return;
 
   // Use delta if available, otherwise use full info
-  let emData = msg.delta || msg.info;
-  if (!emData) return;
+  let ethData = msg.delta || msg.info;
+  if (!ethData) return;
   if (ethData.ip == undefined) return;
 
   let wasConnected = state.ethernetConnected;
@@ -748,14 +749,14 @@ function handleHeartbeat() {
       return;
     }
     else{
-      if (parsedBody.version) {
-        state.pro3.version = parsedBody.version;
+      if (result.data.version) {
+        state.pro3.version = result.data.version;
       }
-      if (parsedBody.relays) {
+      if (result.data.relays) {
         for (let phaseName in CONFIG.PHASES) {
           let relayKey = "relay" + CONFIG.PHASES[phaseName].relayIndex;
-          if (parsedBody.relays[relayKey] !== undefined) {
-            state.phases[phaseName].relay_status = parsedBody.relays[relayKey] ? "on" : "off";
+          if (result.data.relays[relayKey] !== undefined) {
+            state.phases[phaseName].relay_status = result.data.relays[relayKey] ? "on" : "off";
           }
         }
       }
@@ -798,7 +799,7 @@ init(function() {
 
   Shelly.addStatusHandler(function(msg) {
     handleEMStatusUpdate(msg);
-    handleETHStatusUpdate(mqg);
+    handleETHStatusUpdate(msg);
   });
   log("Status handler registered for EM:0 updates and network changes");
 });
