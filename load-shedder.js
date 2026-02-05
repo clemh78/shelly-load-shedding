@@ -38,7 +38,7 @@ let CONFIG = {
 
   // Debug mode
   DEBUG: true,
-  DEBUG_MQTT: false,                // Enable verbose MQTT logs (separate from DEBUG)
+  DEBUG_MQTT: true,                // Enable verbose MQTT logs (separate from DEBUG)
   DRY_RUN: true,                   // Dry run mode: heartbeat works but relay commands are simulated
 
   // 📡 MQTT
@@ -342,7 +342,7 @@ function createRPCMessage(method, data) {
   return {
     method: method,
     params: {
-      ts: Date.now(),
+      ts: Math.floor(Date.now()),
       data: data
     }
   };
@@ -551,10 +551,13 @@ function pro3NowOffline(){
 function syncRelayStates() {
   log("SYNC: Starting relay synchronization...");
 
-  let phaseNames = Object.keys(CONFIG.PHASES);
-  let index = 0;
+  // Build array manually (Object.keys may not work in mJS)
+  let phaseNames = [];
+  for (let p in CONFIG.PHASES) {
+    phaseNames.push(p);
+  }
 
-  function syncNext() {
+  function syncNext(index) {
     if (index >= phaseNames.length) {
       log("SYNC: Completed");
       return;
@@ -563,11 +566,10 @@ function syncRelayStates() {
     let phaseName = phaseNames[index];
     let phaseState = state.phases[phaseName];
     let desiredState = phaseState.active;
-    index++;
 
     if (phaseState.relay_status === "unknown") {
       logError("SYNC: " + phaseName + " relay_status unknown, skipping");
-      syncNext();
+      Timer.set(0, false, function() { syncNext(index + 1); });
       return;
     }
 
@@ -579,22 +581,22 @@ function syncRelayStates() {
       if(desiredState){
         powerOnRelay(phaseName, function(){
           publishPhaseState(phaseName);
-          syncNext();
+          Timer.set(0, false, function() { syncNext(index + 1); });
         });
       }else{
         powerOffRelay(phaseName, function(){
           publishPhaseState(phaseName);
-          syncNext();
+          Timer.set(0, false, function() { syncNext(index + 1); });
         });
       }
 
     } else {
       log("SYNC: " + phaseName + " is in sync (" + (actualState ? "ON" : "OFF") + ")");
-      syncNext();
+      Timer.set(0, false, function() { syncNext(index + 1); });
     }
   }
 
-  syncNext();
+  syncNext(0);
 }
 
 
@@ -766,6 +768,9 @@ function handleHeartbeat() {
       }
     }
 
+    for (let phaseName in state.phases) {
+        publishPhaseState(phaseName);
+    }
     publishRegularStates();
   });
 }
@@ -781,7 +786,6 @@ function startHeartbeat() {
   state.heartbeatTimerId = Timer.set(CONFIG.HEARTBEAT_INTERVAL, true, handleHeartbeat);
   log("HTTP heartbeat started (every " + (CONFIG.HEARTBEAT_INTERVAL/1000) + "s)");
 
-  publishRegularStates();
 }
 
 function stopHeartbeat() {
