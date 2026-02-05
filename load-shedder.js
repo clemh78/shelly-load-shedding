@@ -781,9 +781,7 @@ function startHeartbeat() {
   state.heartbeatTimerId = Timer.set(CONFIG.HEARTBEAT_INTERVAL, true, handleHeartbeat);
   log("HTTP heartbeat started (every " + (CONFIG.HEARTBEAT_INTERVAL/1000) + "s)");
 
-  if (CONFIG.MQTT_ENABLED) {
-    publishRegularStates();
-  }
+  publishRegularStates();
 }
 
 function stopHeartbeat() {
