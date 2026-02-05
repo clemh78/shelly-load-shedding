@@ -172,25 +172,25 @@ function init(callback) {
   }
 
   // 📦 Load persisted stats from KV store, then continue startup
-  loadStatsFromKV(initEthernetState(callback));
+  loadStatsFromKV(function() {
+    initEthernetState(callback);
+  });
 }
 
 function initEthernetState(callback) {
-  if (CONFIG.PRO3_IP) {
-    // Check Ethernet status before starting heartbeat
-    Shelly.call("Eth.GetStatus", {}, function(result, error_code) {
-      if (error_code === 0 && result && result.ip !== null) {
-        // Ethernet is connected - start heartbeat
-        state.ethernetConnected = true;
-        log("Ethernet connected.");
-      } else {
-        // Ethernet not connected - heartbeat will start when connection detected
-        state.ethernetConnected = false;
-        log("Ethernet not connected.");
-      }
-      if (callback) callback();
-    });
-  }
+  // Check Ethernet status before starting heartbeat
+  Shelly.call("Eth.GetStatus", {}, function(result, error_code) {
+    if (error_code === 0 && result && result.ip !== null) {
+      // Ethernet is connected - start heartbeat
+      state.ethernetConnected = true;
+      log("Ethernet connected.");
+    } else {
+      // Ethernet not connected - heartbeat will start when connection detected
+      state.ethernetConnected = false;
+      log("Ethernet not connected.");
+    }
+    if (callback) callback();
+  });
 }
 
 // ============================================================================
@@ -613,6 +613,7 @@ function computeSheddingDecision(active, current, overloadStartTime, lastSheddin
   // ---- OVERLOAD DETECTION ----
   if (current > CONFIG.SHEDDING_THRESHOLD) {
     if (!active) return result;
+    if(overloadStartTime === null) return result;
 
     let overloadDuration = now - overloadStartTime;
     if (current > CONFIG.SHEDDING_THRESHOLD * CONFIG.IMMEDIATE_SHEDDING_MULTIPLIER) {
@@ -686,10 +687,10 @@ function handleEMStatusUpdate(msg) {
       }
 
       //COMPUTE DECISION
-      let sheedingDecision = computeSheddingDecision(phaseState.active, rawCurrent, phaseState.overloadStartTime, phaseState.lastShedding);
-      if (sheedingDecision.needShedding){        
-        startShedding(phaseName, sheedingDecision.sheddingType);
-      }else if (sheedingDecision.needRestoration){
+      let sheddingDecision = computeSheddingDecision(phaseState.active, rawCurrent, phaseState.overloadStartTime, phaseState.lastShedding);
+      if (sheddingDecision.needShedding){        
+        startShedding(phaseName, sheddingDecision.sheddingType);
+      }else if (sheddingDecision.needRestoration){
         stopShedding(phaseName);
       }
     }else{
@@ -702,7 +703,7 @@ function handleEMStatusUpdate(msg) {
 }
 
 function handleETHStatusUpdate(msg) {
-  // Only process EM status updates (ignore other component updates)
+  // Only ETH status updates (ignore other component updates)
   if (!msg || !msg.component || msg.component !== "eth") return;
 
   // Use delta if available, otherwise use full info
@@ -736,7 +737,7 @@ function handleHeartbeat() {
       state.pro3.consecutiveFailures++;
 
       if(result.errorCode === "ethernet_not_connected"){
-        logError("Cannot send heartbeat - ETH disconected");
+        logError("Cannot send heartbeat - ETH disconnected");
       }else if(result.errorCode === "safety_timeout"){
         logError("Heartbeat safety timeout triggered - callback never called");
       }else {
