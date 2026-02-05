@@ -247,190 +247,79 @@ function saveStatsToKV(callback) {
 // RELAY COMMAND
 // ============================================================================
 
-function sendCommand(phaseName, action, onComplete) {
-  let isOn = (action === "on");
-
-  // Log action
-  log("ACTION: " + phaseName + " -> " + action.toUpperCase());
-
-  // DRY_RUN mode: simulate command without sending to relay
-  if (CONFIG.DRY_RUN) {
-    state.phases[phaseName].relay_status = isOn ? "on" : "off";
-    log("DRY_RUN: Would send " + action + " to " + phaseName + " (relay " + CONFIG.PHASES[phaseName].relayIndex + ")");
-    if (onComplete) onComplete();
-    return;
-  }
-
+function sendCommand(relayIndex, action, onComplete) {
   // Send real command via RPC API if PRO3_IP is configured
-  if (CONFIG.PRO3_IP) {
-    // Check if Pro 3 is online before sending command
-    if (!state.pro3.online) {
-      logError("Cannot send command to " + phaseName + " - Pro 3 is OFFLINE");
-      if (onComplete) onComplete();
-      return;
-    }
-
-    let relay = CONFIG.PHASES[phaseName].relayIndex;
-    let url = buildRpcUrl("Switch.Set", "id=" + relay + "&on=" + isOn);
-
-    Shelly.call("HTTP.GET", buildHttpGetParams(url), function(result, error_code, error_message) {
-      if (error_code !== 0 || !result || result.code !== 200) {
-        let errorReason = error_code !== 0 ? error_message : "HTTP " + (result ? result.code : "no response");
-        logError("Relay command " + phaseName + ": " + errorReason);
-        state.phases[phaseName].relay_status = "unknown";
-      } else {
-        state.phases[phaseName].relay_status = isOn ? "on" : "off";
-        log("Command sent: " + phaseName + " -> " + action);
-      }
-      if (onComplete) onComplete();
-    });
-  } else {
-    state.phases[phaseName].relay_status = isOn ? "on" : "off";
-    log("SIMULATION: Would send " + action + " to " + phaseName);
-    if (onComplete) onComplete();
-  }
-}
-
-function syncRelayStates() {
-  if (!CONFIG.PRO3_IP) {
+  if (!CONFIG.PRO3_IP){
+    if (onComplete) onComplete("unknown");
     return;
   }
 
-  log("SYNC: Starting relay synchronization...");
+  // Check if Pro 3 is online before sending command
+  if (!state.pro3.online) {
+    logError("Cannot send command to " + phaseName + " - Pro 3 is OFFLINE");
+    if (onComplete) onComplete("unknown");
+    return;
+  }
 
-  let phaseNames = Object.keys(CONFIG.PHASES);
-  let index = 0;
+  let isOn = (action === "on");
+  let url = buildRpcUrl("Switch.Set", "id=" + relayIndex + "&on=" + isOn);
 
-  function syncNext() {
-    if (index >= phaseNames.length) {
-      log("SYNC: Completed");
-      return;
-    }
-
-    let phaseName = phaseNames[index];
-    let phaseState = state.phases[phaseName];
-    let desiredState = phaseState.active;
-    index++;
-
-    if (phaseState.relay_status === "unknown") {
-      logError("SYNC: " + phaseName + " relay_status unknown, skipping");
-      syncNext();
-      return;
-    }
-
-    let actualState = phaseState.relay_status === "on";
-
-    if (actualState !== desiredState) {
-      log("SYNC: " + phaseName + " mismatch - actual: " + (actualState ? "ON" : "OFF") + ", desired: " + (desiredState ? "ON" : "OFF"));
-      sendCommand(phaseName, desiredState ? "on" : "off", syncNext);
-      publishPhaseState(phaseName);
+  Shelly.call("HTTP.GET", buildHttpGetParams(url), function(result, error_code, error_message) {
+    if (error_code !== 0 || !result || result.code !== 200) {
+      let errorReason = error_code !== 0 ? error_message : "HTTP " + (result ? result.code : "no response");
+      logError("Relay command " + relayIndex + ": " + errorReason);
+      if (onComplete) onComplete("unknown");
     } else {
-      log("SYNC: " + phaseName + " is in sync (" + (actualState ? "ON" : "OFF") + ")");
-      syncNext();
+      log("Command sent: " + phaseName + " -> " + action);
+      if (onComplete) onComplete(isOn ? "on" : "off");
     }
-  }
-
-  syncNext();
+    return;
+  });
 }
 
-function sendHeartbeat() {
-  if (!CONFIG.PRO3_IP) {
+function sendHeartbeat(onComplete) {
+  if (!CONFIG.PRO3_IP){
+    if (onComplete) onComplete({success: false, errorCode: "not_configured", data: {}});
     return;
   }
 
-  // Prevent concurrent heartbeats
+  if (!state.ethernetConnected) {
+    if (onComplete) onComplete({success: false, errorCode: "ethernet_not_connected", data: {}});
+    return;
+  }
+
   if (state.heartbeatInProgress) {
-    log("Skipping heartbeat (previous one still in progress)");
+    if (onComplete) onComplete({success: false, errorCode: "already_in_progress", data: {}});
     return;
   }
 
   state.heartbeatInProgress = true;
 
-  // Call Pro3's HTTPServer endpoint /heartbeat
-  let url = "http://" + CONFIG.PRO3_IP + "/script/" + CONFIG.PRO3_SCRIPT_ID + "/heartbeat";
-
-  // Safety timer: force reset heartbeatInProgress after 2x HTTP timeout
-  // This prevents infinite lockup if the HTTP callback is never called
   let safetyTimeout = CONFIG.HTTP_TIMEOUT * 2;
-  let safetyTimer = Timer.set(safetyTimeout, false, function() {
+  let safetyTimer = Timer.set(safetyTimeout, false, function(onComplete) {
     if (state.heartbeatInProgress) {
-      logError("Heartbeat safety timeout triggered - callback never called");
       state.heartbeatInProgress = false;
-
-      // Count as failure to prevent zombie accumulation
-      state.pro3.consecutiveFailures++;
-      if (state.pro3.consecutiveFailures >= CONFIG.MAX_CONSECUTIVE_FAILURES && state.pro3.online) {
-        state.pro3.online = false;
-        logError("Pro 3 is now OFFLINE (timeout)");
-
-        // Reset relay_status to unknown for all phases
-        for (let phaseName in state.phases) {
-          state.phases[phaseName].relay_status = "unknown";
-        }
-        publishRegularStates();
-      }
+      if (onComplete) onComplete({success: false, errorCode: "safety_timeout", data: {}});
+      return;
     }
   });
 
-  Shelly.call("HTTP.GET", buildHttpGetParams(url), function(result, error_code, error_message) {
-    // Clear safety timer since callback was called
+  let url = "http://" + CONFIG.PRO3_IP + "/script/" + CONFIG.PRO3_SCRIPT_ID + "/heartbeat";
+  Shelly.call("HTTP.GET", buildHttpGetParams(url), function(result, error_code, error_message) { 
     Timer.clear(safetyTimer);
 
-    // Capture wasOnline inside callback to avoid closure issues with overlapping heartbeats
-    let wasOnline = state.pro3.online;
-
     if (error_code !== 0 || !result || result.code !== 200) {
-      // Heartbeat failed = Pro 3 is offline
-      state.pro3.consecutiveFailures++;
-      let errorReason = error_code !== 0 ? error_message : "HTTP " + (result ? result.code : "no response");
-      log("Heartbeat failed (" + state.pro3.consecutiveFailures + "/" + CONFIG.MAX_CONSECUTIVE_FAILURES + "): " + errorReason);
-
-      if (state.pro3.consecutiveFailures >= CONFIG.MAX_CONSECUTIVE_FAILURES && wasOnline) {
-        state.pro3.online = false;
-        logError("Pro 3 is now OFFLINE");
-
-        // Reset relay_status to unknown for all phases
-        for (let phaseName in state.phases) {
-          state.phases[phaseName].relay_status = "unknown";
-        }
-      }
-    } else {
-      // Heartbeat succeeded = Pro 3 is online
-      state.pro3.consecutiveFailures = 0;
-
-      // Update relay_status from heartbeat response
+      let errorReason = error_code !== 0 ? error_message : "HTTP " + (result ? result.code : "no_response");
+      if (onComplete) onComplete({success: false, errorCode: errorReason, resultData: {}});
+      return;
+    }else{
       let parsedBody = typeof result.body === "string" ? JSON.parse(result.body) : result.body;
       if (parsedBody) {
-        // Store Pro 3 script version
-        if (parsedBody.version) {
-          state.pro3.version = parsedBody.version;
-        }
-
-        // Update relay states
-        if (parsedBody.relays) {
-          for (let phaseName in CONFIG.PHASES) {
-            let relayKey = "relay" + CONFIG.PHASES[phaseName].relayIndex;
-            if (parsedBody.relays[relayKey] !== undefined) {
-              state.phases[phaseName].relay_status = parsedBody.relays[relayKey] ? "on" : "off";
-            }
-          }
-        }
+        if (onComplete) onComplete({success: true, errorCode: null, resultData: parsedBody});
+        return;
       }
-
-      if (!wasOnline) {
-        // Was offline, now online (reconnection or first connection at startup)
-        state.pro3.online = true;
-        log("Pro 3 is now ONLINE - triggering relay synchronization");
-
-        syncRelayStates();
-      }
-      // else: already online, everything ok (no action needed)
     }
 
-    // Publish states after every heartbeat (success or failure)
-    publishRegularStates();
-
-    // Release lock after all state updates are done
     state.heartbeatInProgress = false;
   });
 }
@@ -493,9 +382,6 @@ function publishRegularStates() {
   for (let phaseName in state.phases) {
     let phaseState = state.phases[phaseName];
 
-    // Publish individual relay state
-    publishPhaseState(phaseName);
-
     // Add to global status
     let phaseKey = phaseName.toLowerCase();
     statusData[phaseKey + "_overload"] = phaseState.overload;
@@ -519,6 +405,198 @@ function publishRegularStates() {
 
   logMQTT("Regular states published");
 }
+
+// ============================================================================
+// ACTIONS
+// ============================================================================
+
+function powerOnRelay(phaseName, callback){
+  let phaseState = state.phases[phaseName];
+  let relayIndex = CONFIG.PHASES[phaseName].relayIndex;
+
+  if(phaseState.relay_status === "on"){
+    if (callback) callback();
+    return;
+  }
+  
+  log("ACTION: " + phaseName + " -> ON");
+
+  if (CONFIG.DRY_RUN) {
+    phaseState.relay_status = "on";
+    log("DRY_RUN: Would send " + action + " to " + phaseName + " (relay " + relayIndex + ")");
+    if (callback) callback();
+    return;
+  }else{
+    sendCommand(relayIndex, "on", function(result){
+      phaseState.relay_status = result;
+      if (callback) callback();
+      return;
+    });
+  }
+}
+
+function powerOffRelay(phaseName, callback){
+  let phaseState = state.phases[phaseName];
+  let relayIndex = CONFIG.PHASES[phaseName].relayIndex;
+
+  if(phaseState.relay_status === "off"){
+    if (callback) callback();
+    return;
+  }
+
+  log("ACTION: " + phaseName + " -> OFF");
+
+  if (CONFIG.DRY_RUN) {
+    phaseState.relay_status = "off";
+    log("DRY_RUN: Would send " + action + " to " + phaseName + " (relay " + relayIndex + ")");
+    if (callback) callback();
+    return;
+  }else{
+    sendCommand(relayIndex, "off", function(result){
+      phaseState.relay_status = result;
+      if (callback) callback();
+      return;
+    });
+  }
+}
+
+function startShedding(phaseName, sheddingType){
+  let phaseState = state.phases[phaseName];
+
+  if(!phaseState.active) return;
+
+  powerOffRelay(phaseName, function(){
+    if(sheddingType === "immediate"){
+      log("IMMEDIATE SHEDDING " + phaseName + " (overload > " + (CONFIG.IMMEDIATE_SHEDDING_MULTIPLIER * 100) + "%)");
+    }else if(sheddingType === "normal"){
+      log("SHEDDING " + phaseName + " (overload for " + (overloadDuration/1000).toFixed(1) + "s)");
+    }
+
+    phaseState.active = false;
+    phaseState.lastShedding = now;
+    phaseState.sheddingCount++;
+
+    publishEvent(phaseName, sheddingType + "_shedding", phaseState.current);
+    publishPhaseState(phaseName);
+    saveStatsToKV();
+  });
+}
+
+function stopShedding(phaseName){
+  let phaseState = state.phases[phaseName];
+  
+  if(phaseState.active) return;
+
+  powerOnRelay(phaseName, function(){
+    log("RESTORATION " + phaseName + " (delay " + (CONFIG.RESTORATION_DELAY/1000) + "s elapsed)");
+
+    phaseState.active = true;
+
+    publishEvent(phaseName, "restoration", phaseState.current);
+    publishPhaseState(phaseName);
+  });
+}
+
+function startOverload(phaseName){
+  let phaseState = state.phases[phaseName];
+  
+  if(phaseState.overload) return;
+
+  log("OVERLOAD detected " + phaseName + ": " + current.toFixed(2) + "A > " + CONFIG.SHEDDING_THRESHOLD + "A");
+
+  phaseState.overload = true;
+  phaseState.overloadStartTime = Date.now();
+
+  publishEvent(phaseName, "overload", phaseState.current);
+  publishPhaseState(phaseName);
+}
+
+function stopOverload(phaseName){
+  let phaseState = state.phases[phaseName];
+  
+  if(!phaseState.overload) return;
+
+  log("CANCEL overload tracking " + phaseName + " (current back to normal)");
+
+  phaseState.overload = false;
+  phaseState.overloadStartTime = null;
+
+  publishPhaseState(phaseName);
+}
+
+function pro3NowOnline(){
+  if(state.pro3.online) return;
+  
+  log("Pro 3 is now ONLINE - triggering relay synchronization");
+
+  syncRelayStates();
+
+  state.pro3.online = true;
+  state.pro3.consecutiveFailures = 0;
+}
+
+function pro3NowOffline(){
+  if(!state.pro3.online) return;
+
+  logError("Pro 3 is now OFFLINE");
+
+  // Reset relay_status to unknown for all phases
+  for (let phaseName in state.phases) {
+    state.phases[phaseName].relay_status = "unknown";
+  }
+
+  state.pro3.online = false;
+}
+
+function syncRelayStates() {
+  log("SYNC: Starting relay synchronization...");
+
+  let phaseNames = Object.keys(CONFIG.PHASES);
+  let index = 0;
+
+  function syncNext() {
+    if (index >= phaseNames.length) {
+      log("SYNC: Completed");
+      return;
+    }
+
+    let phaseName = phaseNames[index];
+    let phaseState = state.phases[phaseName];
+    let desiredState = phaseState.active;
+    index++;
+
+    if (phaseState.relay_status === "unknown") {
+      logError("SYNC: " + phaseName + " relay_status unknown, skipping");
+      syncNext();
+      return;
+    }
+
+    let actualState = phaseState.relay_status === "on";
+
+    if (actualState !== desiredState) {
+      log("SYNC: " + phaseName + " mismatch - actual: " + (actualState ? "ON" : "OFF") + ", desired: " + (desiredState ? "ON" : "OFF"));
+
+      if(desiredState){
+        powerOnRelay(phaseName, function(){
+          publishPhaseState(phaseName);
+          syncNext();
+        });
+      }else{
+        powerOffRelay(phaseName, function(){
+          publishPhaseState(phaseName);
+          syncNext();
+        });
+      }
+
+    } else {
+      log("SYNC: " + phaseName + " is in sync (" + (actualState ? "ON" : "OFF") + ")");
+      syncNext();
+    }
+  }
+
+  syncNext();
+}
+
 
 // ============================================================================
 // SHEDDING LOGIC
@@ -579,72 +657,8 @@ function computeOverloadingDecision(overload, current){
 }
 
 // ============================================================================
-// MAIN CYCLE (triggered by status updates)
+// HANDLERS
 // ============================================================================
-
-function startShedding(phaseName, sheddingType){
-  let phaseState = state.phases[phaseName];
-
-  if(!phaseState.active) return;
-
-  //sendCommand(phaseName, "off");
-
-  if(sheddingType === "immediate"){
-    log("IMMEDIATE SHEDDING " + phaseName + " (overload > " + (CONFIG.IMMEDIATE_SHEDDING_MULTIPLIER * 100) + "%)");
-  }else if(sheddingType === "normal"){
-    log("SHEDDING " + phaseName + " (overload for " + (overloadDuration/1000).toFixed(1) + "s)");
-  }
-
-  phaseState.active = false;
-  phaseState.lastShedding = now;
-  phaseState.sheddingCount++;
-
-  publishEvent(phaseName, sheddingType + "_shedding", phaseState.current);
-  publishPhaseState(phaseName);
-  saveStatsToKV();
-}
-
-function stopShedding(phaseName){
-  let phaseState = state.phases[phaseName];
-  
-  if(phaseState.active) return;
-
-  //sendCommand(phaseName, "on");
-
-  log("RESTORATION " + phaseName + " (delay " + (CONFIG.RESTORATION_DELAY/1000) + "s elapsed)");
-
-  phaseState.active = true;
-
-  publishEvent(phaseName, "restoration", phaseState.current);
-  publishPhaseState(phaseName);
-}
-
-function startOverload(phaseName){
-  let phaseState = state.phases[phaseName];
-  
-  if(phaseState.overload) return;
-
-  log("OVERLOAD detected " + phaseName + ": " + current.toFixed(2) + "A > " + CONFIG.SHEDDING_THRESHOLD + "A");
-
-  phaseState.overload = true;
-  phaseState.overloadStartTime = Date.now();
-
-  publishEvent(phaseName, "overload", phaseState.current);
-  publishPhaseState(phaseName);
-}
-
-function stopOverload(phaseName){
-  let phaseState = state.phases[phaseName];
-  
-  if(!phaseState.overload) return;
-
-  log("CANCEL overload tracking " + phaseName + " (current back to normal)");
-
-  phaseState.overload = false;
-  phaseState.overloadStartTime = null;
-
-  publishPhaseState(phaseName);
-}
 
 function handleEMStatusUpdate(msg) {
   // Only process EM status updates (ignore other component updates)
@@ -703,25 +717,55 @@ function handleETHStatusUpdate(msg) {
 
     if (isConnected) {
       log("🌐 Ethernet CONNECTED");
-      state.pro3.consecutiveFailures = 0;
       startHeartbeat();
     } else {
       log("🌐 Ethernet DISCONNECTED");
+      pro3NowOffline();
       stopHeartbeat();
-
-      // Pro 3 is unreachable without network - mark offline
-      if (state.pro3.online) {
-        state.pro3.online = false;
-        logError("Pro 3 is now OFFLINE (no network)");
-
-        // Reset relay_status to unknown for all phases
-        for (let phaseName in state.phases) {
-          state.phases[phaseName].relay_status = "unknown";
-        }
-        publishRegularStates();
-      }
     }
   }
+}
+
+function handleHeartbeat() {
+  sendHeartbeat(function(result){
+    if(!result.success){
+      if(result.errorCode === "not_configured" || result.errorCode === "already_in_progress")
+        return;
+
+      state.pro3.consecutiveFailures++;
+
+      if(result.errorCode === "ethernet_not_connected"){
+        logError("Cannot send heartbeat - ETH disconected");
+      }else if(result.errorCode === "safety_timeout"){
+        logError("Heartbeat safety timeout triggered - callback never called");
+      }else {
+        logError("Heartbeat failed (" + state.pro3.consecutiveFailures + "/" + CONFIG.MAX_CONSECUTIVE_FAILURES + "): " + result.errorReason);
+      }
+
+      if (state.pro3.consecutiveFailures >= CONFIG.MAX_CONSECUTIVE_FAILURES && state.pro3.online) {
+        pro3NowOffline();
+      }
+      return;
+    }
+    else{
+      if (parsedBody.version) {
+        state.pro3.version = parsedBody.version;
+      }
+      if (parsedBody.relays) {
+        for (let phaseName in CONFIG.PHASES) {
+          let relayKey = "relay" + CONFIG.PHASES[phaseName].relayIndex;
+          if (parsedBody.relays[relayKey] !== undefined) {
+            state.phases[phaseName].relay_status = parsedBody.relays[relayKey] ? "on" : "off";
+          }
+        }
+      }
+      if (!state.pro3.online) {
+        pro3NowOnline();
+      }
+    }
+
+    publishRegularStates();
+  });
 }
 
 // ============================================================================
@@ -731,8 +775,8 @@ function handleETHStatusUpdate(msg) {
 function startHeartbeat() {
   if (state.heartbeatTimerId !== null) return;
 
-  sendHeartbeat();
-  state.heartbeatTimerId = Timer.set(CONFIG.HEARTBEAT_INTERVAL, true, sendHeartbeat);
+  handleHeartbeat();
+  state.heartbeatTimerId = Timer.set(CONFIG.HEARTBEAT_INTERVAL, true, handleHeartbeat);
   log("HTTP heartbeat started (every " + (CONFIG.HEARTBEAT_INTERVAL/1000) + "s)");
 
   if (CONFIG.MQTT_ENABLED) {
