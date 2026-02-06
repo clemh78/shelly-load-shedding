@@ -38,7 +38,7 @@ let CONFIG = {
 
   // Debug mode
   DEBUG: true,
-  DEBUG_MQTT: true,                // Enable verbose MQTT logs (separate from DEBUG)
+  DEBUG_MQTT: false,                // Enable verbose MQTT logs (separate from DEBUG)
   DRY_RUN: true,                   // Dry run mode: heartbeat works but relay commands are simulated
 
   // 📡 MQTT
@@ -262,6 +262,13 @@ function sendCommand(relayIndex, action, onComplete) {
   }
 
   let isOn = (action === "on");
+
+  if (CONFIG.DRY_RUN) {
+    log("DRY_RUN: Would send " + action + " to " + relayIndex);
+    if (onComplete) onComplete(isOn ? "on" : "off");
+    return;
+  }
+
   let url = buildRpcUrl("Switch.Set", "id=" + relayIndex + "&on=" + isOn);
 
   Shelly.call("HTTP.GET", buildHttpGetParams(url), function(result, error_code, error_message) {
@@ -420,18 +427,11 @@ function powerOnRelay(phaseName, callback){
   
   log("ACTION: " + phaseName + " -> ON");
 
-  if (CONFIG.DRY_RUN) {
-    phaseState.relay_status = "on";
-    log("DRY_RUN: Would send ON to " + phaseName + " (relay " + relayIndex + ")");
+  sendCommand(relayIndex, "on", function(result){
+    phaseState.relay_status = result;
     if (callback) callback();
     return;
-  }else{
-    sendCommand(relayIndex, "on", function(result){
-      phaseState.relay_status = result;
-      if (callback) callback();
-      return;
-    });
-  }
+  });
 }
 
 function powerOffRelay(phaseName, callback){
@@ -445,24 +445,21 @@ function powerOffRelay(phaseName, callback){
 
   log("ACTION: " + phaseName + " -> OFF");
 
-  if (CONFIG.DRY_RUN) {
-    phaseState.relay_status = "off";
-    log("DRY_RUN: Would send OFF to " + phaseName + " (relay " + relayIndex + ")");
+  sendCommand(relayIndex, "off", function(result){
+    phaseState.relay_status = result;
     if (callback) callback();
     return;
-  }else{
-    sendCommand(relayIndex, "off", function(result){
-      phaseState.relay_status = result;
-      if (callback) callback();
-      return;
-    });
-  }
+  });
 }
 
 function startShedding(phaseName, sheddingType){
   let phaseState = state.phases[phaseName];
 
   if(!phaseState.active) return;
+
+  phaseState.active = false;
+  phaseState.lastShedding = Date.now();
+  phaseState.sheddingCount++;
 
   powerOffRelay(phaseName, function(){
     if(sheddingType === "immediate"){
@@ -472,10 +469,6 @@ function startShedding(phaseName, sheddingType){
       log("SHEDDING " + phaseName + " (overload for " + (overloadDuration/1000).toFixed(1) + "s)");
     }
 
-    phaseState.active = false;
-    phaseState.lastShedding = Date.now();
-    phaseState.sheddingCount++;
-
     publishEvent(phaseName, sheddingType + "_shedding", phaseState.current);
     publishPhaseState(phaseName);
     saveStatsToKV();
@@ -484,13 +477,13 @@ function startShedding(phaseName, sheddingType){
 
 function stopShedding(phaseName){
   let phaseState = state.phases[phaseName];
-  
+
   if(phaseState.active) return;
+
+  phaseState.active = true;
 
   powerOnRelay(phaseName, function(){
     log("RESTORATION " + phaseName + " (delay " + (CONFIG.RESTORATION_DELAY/1000) + "s elapsed)");
-
-    phaseState.active = true;
 
     publishEvent(phaseName, "restoration", phaseState.current);
     publishPhaseState(phaseName);
@@ -526,13 +519,13 @@ function stopOverload(phaseName){
 
 function pro3NowOnline(){
   if(state.pro3.online) return;
-  
-  log("Pro 3 is now ONLINE - triggering relay synchronization");
 
-  syncRelayStates();
+  log("Pro 3 is now ONLINE - triggering relay synchronization");
 
   state.pro3.online = true;
   state.pro3.consecutiveFailures = 0;
+
+  syncRelayStates();
 }
 
 function pro3NowOffline(){
