@@ -14,7 +14,7 @@
 
 let CONFIG = {
   // Script version
-  VERSION: "1.7",
+  VERSION: "2.0",
 
   // Network addresses (leave empty for simulation mode)
   PRO3_IP: "192.168.1.103",                // Set to Pro 3EM IP (e.g., "10.0.0.101") or leave empty for simulation
@@ -134,8 +134,7 @@ function logPhaseMeasurements(emData) {
     }
 
     // Build measurement with relay state
-    let relayState = phaseState.active ? "ON" : "OFF";
-    let measurement = indicator + phaseName + "=" + textCurrent + "A(" + relayState;
+    let measurement = indicator + phaseName + "=" + textCurrent + "A(" + phaseState.relay_status;
 
     // Add restoration countdown if phase is shed
     if (!phaseState.active && phaseState.lastShedding) {
@@ -250,14 +249,14 @@ function saveStatsToKV(callback) {
 function sendCommand(relayIndex, action, onComplete) {
   // Send real command via RPC API if PRO3_IP is configured
   if (!CONFIG.PRO3_IP){
-    if (onComplete) onComplete("unknown");
+    if (onComplete) Timer.set(0, false, function() { onComplete("unknown"); });
     return;
   }
 
   // Check if Pro 3 is online before sending command
   if (!state.pro3.online) {
     logError("Cannot send command to " + relayIndex + " - Pro 3 is OFFLINE");
-    if (onComplete) onComplete("unknown");
+    if (onComplete) Timer.set(0, false, function() { onComplete("unknown"); });
     return;
   }
 
@@ -265,7 +264,8 @@ function sendCommand(relayIndex, action, onComplete) {
 
   if (CONFIG.DRY_RUN) {
     log("DRY_RUN: Would send " + action + " to " + relayIndex);
-    if (onComplete) onComplete(isOn ? "on" : "off");
+    let result = isOn ? "on" : "off";
+    if (onComplete) Timer.set(0, false, function() { onComplete(result); });
     return;
   }
 
@@ -286,23 +286,23 @@ function sendCommand(relayIndex, action, onComplete) {
 
 function sendHeartbeat(onComplete) {
   if (!CONFIG.PRO3_IP){
-    if (onComplete) onComplete({success: false, errorCode: "not_configured", data: {}});
+    if (onComplete) Timer.set(0, false, function() { onComplete({success: false, errorCode: "not_configured", data: {}}); });
     return;
   }
 
   if (!state.ethernetConnected) {
-    if (onComplete) onComplete({success: false, errorCode: "ethernet_not_connected", data: {}});
+    if (onComplete) Timer.set(0, false, function() { onComplete({success: false, errorCode: "ethernet_not_connected", data: {}}); });
     return;
   }
 
   if (state.heartbeatInProgress) {
-    if (onComplete) onComplete({success: false, errorCode: "already_in_progress", data: {}});
+    if (onComplete) Timer.set(0, false, function() { onComplete({success: false, errorCode: "already_in_progress", data: {}}); });
     return;
   }
 
   state.heartbeatInProgress = true;
 
-  let safetyTimeout = CONFIG.HTTP_TIMEOUT * 2;
+  let safetyTimeout = CONFIG.HTTP_TIMEOUT * 3;
   let safetyTimer = Timer.set(safetyTimeout, false, function() {
     if (state.heartbeatInProgress) {
       state.heartbeatInProgress = false;
@@ -371,15 +371,14 @@ function publishPhaseState(phaseName) {
 }
 
 function publishEvent(phaseName, action, current) {
-  let msg = createRPCMessage("NotifyEvent", {
-    phase: phaseName,
+    let msg = createRPCMessage("NotifyEvent", {
+      phase: phaseName,
     relay: CONFIG.PHASES[phaseName].relayIndex,
-    action: action,
+      action: action,
     current: current ? current.toFixed(2) : null
   });
 
   publishMQTT("events", msg, false);
-  publishMQTT(phaseName + "/event", msg, false);
 }
 
 function publishRegularStates() {
@@ -421,7 +420,7 @@ function powerOnRelay(phaseName, callback){
   let relayIndex = CONFIG.PHASES[phaseName].relayIndex;
 
   if(phaseState.relay_status === "on"){
-    if (callback) callback();
+    if (callback) Timer.set(0, false, function() { callback(); });
     return;
   }
   
@@ -439,7 +438,7 @@ function powerOffRelay(phaseName, callback){
   let relayIndex = CONFIG.PHASES[phaseName].relayIndex;
 
   if(phaseState.relay_status === "off"){
-    if (callback) callback();
+    if (callback) Timer.set(0, false, function() { callback(); });
     return;
   }
 
@@ -598,27 +597,19 @@ function syncRelayStates() {
 // ============================================================================
 
 function computeSheddingDecision(active, current, overloadStartTime, lastShedding) {
-  let result = {
-    needShedding: false,
-    needRestoration: false,
-    sheddingType: "",
-  }
   let now = Date.now();
 
   // ---- OVERLOAD DETECTION ----
   if (current > CONFIG.SHEDDING_THRESHOLD) {
-    if (!active) return result;
-    if(overloadStartTime === null) return result;
+    if (!active) return null;
+    if(overloadStartTime === null) return null;
 
-    let overloadDuration = now - overloadStartTime;
     if (current > CONFIG.SHEDDING_THRESHOLD * CONFIG.IMMEDIATE_SHEDDING_MULTIPLIER) {
       // Immediate shedding if well above threshold
-      result.needShedding = true;
-      result.sheddingType = "immediate";
-    } else if (overloadDuration >= CONFIG.SHEDDING_DELAY) {
+      return "immediate"
+    } else if ((now - overloadStartTime) >= CONFIG.SHEDDING_DELAY) {
       // Normal shedding after delay
-      result.needShedding = true;
-      result.sheddingType = "normal";
+      return "normal"
     }
   }
   // ---- NO OVERLOAD ----
@@ -630,27 +621,22 @@ function computeSheddingDecision(active, current, overloadStartTime, lastSheddin
         let elapsed = now - lastShedding;
 
         if (elapsed >= CONFIG.RESTORATION_DELAY) {
-          result.needRestoration = true;
+          return "restore"
         }
       }
     }
   }
 
-  return result;
+  return null;
 }
 
 function computeOverloadingDecision(overload, current){
-  let result = {
-    needOverload: false,
-    needEndOfOverload: false,
-  }
-
   if(!overload && current > CONFIG.SHEDDING_THRESHOLD){
-    result.needOverload = true;
+    return "start";
   }else if (overload && current <= CONFIG.SHEDDING_THRESHOLD){
-    result.needEndOfOverload = true;
+    return "end"
   }
-  return result;
+  return null;
 }
 
 // ============================================================================
@@ -675,17 +661,17 @@ function handleEMStatusUpdate(msg) {
 
       //COMPUTE OVERLOAD
       let overloadDecision = computeOverloadingDecision(phaseState.overload, rawCurrent);
-      if (overloadDecision.needOverload){        
+      if (overloadDecision && overloadDecision === "start"){        
         startOverload(phaseName);
-      }else if (overloadDecision.needEndOfOverload){
+      }else if (overloadDecision && overloadDecision === "end"){
         stopOverload(phaseName);
       }
 
       //COMPUTE DECISION
       let sheddingDecision = computeSheddingDecision(phaseState.active, rawCurrent, phaseState.overloadStartTime, phaseState.lastShedding);
-      if (sheddingDecision.needShedding){        
-        startShedding(phaseName, sheddingDecision.sheddingType);
-      }else if (sheddingDecision.needRestoration){
+      if (sheddingDecision && (sheddingDecision === "immediate" || sheddingDecision === "normal")){        
+        startShedding(phaseName, sheddingDecision);
+      }else if (sheddingDecision === "restore"){
         stopShedding(phaseName);
       }
     }else{
