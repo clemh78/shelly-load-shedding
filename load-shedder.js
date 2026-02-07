@@ -1,11 +1,9 @@
 /******************************************************************************
  * INTELLIGENT THREE-PHASE LOAD SHEDDING - Pro 3EM
- * Author: Clément
+ * Author: Clément Hémidy
  *
  * Installation: Shelly Pro 3EM → Settings → Scripts → Add Script
  * IP: 10.0.0.100
- *
- * ⚙️ SIMULATION MODE: Leave PRO3_IP empty for testing without hardware
  ******************************************************************************/
 
 // ============================================================================
@@ -150,6 +148,23 @@ function logPhaseMeasurements(emData) {
   }
 
   log("Measurements: " + measurements.join("  "));
+}
+
+function chainOperations(ids, operation, onComplete) {
+  if (ids.length === 0) {
+    if (onComplete) Timer.set(0, false, function() { onComplete(); });
+    return;
+  }
+
+  let id = ids[0];
+  let remaining = ids.slice(1);
+
+  operation(id, function() {
+    // Use Timer.set for next iteration to prevent deep call stacks
+    Timer.set(0, false, function() {
+      chainOperations(remaining, operation, onComplete);
+    });
+  });
 }
 
 // ============================================================================
@@ -540,6 +555,37 @@ function pro3NowOffline(){
   state.pro3.online = false;
 }
 
+function syncRelayState(phaseName, callback) {
+  let phaseState = state.phases[phaseName];
+
+  if (phaseState.relay_status === "unknown") {
+    logError("SYNC: " + phaseName + " relay_status unknown, skipping");
+    Timer.set(0, false, function() { callback(); });
+    return;
+  }
+
+  let actualState = phaseState.relay_status === "on";
+  if (actualState !== phaseState.active) {
+    log("SYNC: " + phaseName + " mismatch - actual: " + (actualState ? "ON" : "OFF") + ", desired: " + (phaseState.active ? "ON" : "OFF"));
+
+    if(phaseState.active){
+      powerOnRelay(phaseName, function(){
+        publishPhaseState(phaseName);
+        callback();
+      });
+    }else{
+      powerOffRelay(phaseName, function(){
+        publishPhaseState(phaseName);
+        callback();
+      });
+    }
+  } else {
+    log("SYNC: " + phaseName + " is in sync (" + (actualState ? "ON" : "OFF") + ")");
+    Timer.set(0, false, function() { callback(); });
+    return;
+  }
+}
+
 function syncRelayStates() {
   log("SYNC: Starting relay synchronization...");
 
@@ -549,46 +595,9 @@ function syncRelayStates() {
     phaseNames.push(p);
   }
 
-  function syncNext(index) {
-    if (index >= phaseNames.length) {
-      log("SYNC: Completed");
-      return;
-    }
-
-    let phaseName = phaseNames[index];
-    let phaseState = state.phases[phaseName];
-    let desiredState = phaseState.active;
-
-    if (phaseState.relay_status === "unknown") {
-      logError("SYNC: " + phaseName + " relay_status unknown, skipping");
-      Timer.set(0, false, function() { syncNext(index + 1); });
-      return;
-    }
-
-    let actualState = phaseState.relay_status === "on";
-
-    if (actualState !== desiredState) {
-      log("SYNC: " + phaseName + " mismatch - actual: " + (actualState ? "ON" : "OFF") + ", desired: " + (desiredState ? "ON" : "OFF"));
-
-      if(desiredState){
-        powerOnRelay(phaseName, function(){
-          publishPhaseState(phaseName);
-          Timer.set(0, false, function() { syncNext(index + 1); });
-        });
-      }else{
-        powerOffRelay(phaseName, function(){
-          publishPhaseState(phaseName);
-          Timer.set(0, false, function() { syncNext(index + 1); });
-        });
-      }
-
-    } else {
-      log("SYNC: " + phaseName + " is in sync (" + (actualState ? "ON" : "OFF") + ")");
-      Timer.set(0, false, function() { syncNext(index + 1); });
-    }
-  }
-
-  syncNext(0);
+  chainOperations(phaseNames, syncRelayState, function() {
+    log("SYNC: Completed relay synchronization");
+  });
 }
 
 
