@@ -10,6 +10,8 @@ const SHELLY_IP = process.env.SHELLY_IP || "192.168.1.100";
 const SHELLY_SCRIPT_ID = process.env.SHELLY_SCRIPT_ID || "1";
 const SHELLY_BASE_URL = `http://${SHELLY_IP}`;
 const INJECT_ENDPOINT = `${SHELLY_BASE_URL}/script/${SHELLY_SCRIPT_ID}/inject-status`;
+const GET_STATUS_ENDPOINT = `${SHELLY_BASE_URL}/script/${SHELLY_SCRIPT_ID}/get-status`;
+const MOCK_SERVER_URL = process.env.MOCK_SERVER_URL || "http://localhost:3100";
 
 // Helper functions
 async function sleep(ms) {
@@ -50,6 +52,112 @@ async function injectETH(connected) {
   } catch (error) {
     console.error(`   ❌ Failed to inject ETH status: ${error.message}`);
     throw error;
+  }
+}
+
+// ============================================================================
+// Status & Control Helpers
+// ============================================================================
+
+/**
+ * Get current state from Shelly load-shedder
+ */
+async function getShellyStatus() {
+  try {
+    const response = await axios.get(GET_STATUS_ENDPOINT);
+    return response.data;
+  } catch (error) {
+    console.error(`   ❌ Failed to get Shelly status: ${error.message}`);
+    throw error;
+  }
+}
+
+/**
+ * Get mock server status (relays state)
+ */
+async function getMockServerStatus() {
+  try {
+    const response = await axios.get(`${MOCK_SERVER_URL}/status`);
+    return response.data;
+  } catch (error) {
+    console.error(`   ❌ Failed to get mock server status: ${error.message}`);
+    throw error;
+  }
+}
+
+/**
+ * Set mock server relay state
+ */
+async function setMockRelay(relayId, state) {
+  try {
+    const response = await axios.post(`${MOCK_SERVER_URL}/set-relay`, {
+      relayId: relayId,
+      state: state
+    });
+    console.log(`   🔧 Mock relay ${relayId} set to ${state ? 'ON' : 'OFF'}`);
+    return response.data;
+  } catch (error) {
+    console.error(`   ❌ Failed to set mock relay: ${error.message}`);
+    throw error;
+  }
+}
+
+/**
+ * Set mock server online/offline
+ */
+async function setMockOnline(online) {
+  try {
+    const response = await axios.post(`${MOCK_SERVER_URL}/set-online`, {
+      online: online
+    });
+    console.log(`   🔧 Mock server set to ${online ? 'ONLINE' : 'OFFLINE'}`);
+    return response.data;
+  } catch (error) {
+    console.error(`   ❌ Failed to set mock online state: ${error.message}`);
+    throw error;
+  }
+}
+
+/**
+ * Print detailed status from both Shelly and Mock Server
+ */
+async function printStatus() {
+  console.log('\n📊 Current Status:');
+
+  try {
+    const shellyStatus = await getShellyStatus();
+    const mockStatus = await getMockServerStatus();
+
+    console.log('\n🔌 Shelly Load-Shedder:');
+    console.log(`   Network: ${shellyStatus.state.network.connected ? '✅ Connected' : '❌ Disconnected'}`);
+    console.log(`   Pro3: ${shellyStatus.state.pro3.online ? '✅ Online' : '❌ Offline'}`);
+
+    console.log('\n   L1:');
+    console.log(`     State: ${shellyStatus.state.l1.state}`);
+    console.log(`     Current: ${shellyStatus.state.l1.current}A`);
+    console.log(`     Relay (desired): ${shellyStatus.state.pro3.relays.l1}`);
+    console.log(`     Shedding count: ${shellyStatus.state.l1.sheddingCount}`);
+
+    console.log('\n   L2:');
+    console.log(`     State: ${shellyStatus.state.l2.state}`);
+    console.log(`     Current: ${shellyStatus.state.l2.current}A`);
+    console.log(`     Relay (desired): ${shellyStatus.state.pro3.relays.l2}`);
+    console.log(`     Shedding count: ${shellyStatus.state.l2.sheddingCount}`);
+
+    console.log('\n   L3:');
+    console.log(`     State: ${shellyStatus.state.l3.state}`);
+    console.log(`     Current: ${shellyStatus.state.l3.current}A`);
+    console.log(`     Relay (desired): ${shellyStatus.state.pro3.relays.l3}`);
+    console.log(`     Shedding count: ${shellyStatus.state.l3.sheddingCount}`);
+
+    console.log('\n🔌 Mock Server (Pro3):');
+    console.log(`   Online: ${mockStatus.online ? '✅' : '❌'}`);
+    console.log(`   Relay 0 (L1): ${mockStatus.relays[0] ? '✅ ON' : '❌ OFF'}`);
+    console.log(`   Relay 1 (L2): ${mockStatus.relays[1] ? '✅ ON' : '❌ OFF'}`);
+    console.log(`   Relay 2 (L3): ${mockStatus.relays[2] ? '✅ ON' : '❌ OFF'}`);
+
+  } catch (error) {
+    console.error('   ❌ Failed to get status:', error.message);
   }
 }
 
@@ -267,17 +375,11 @@ async function scenario8_ethernetDisconnection() {
   await sleep(1000);
 
   console.log('\n📤 Step 2: Setting relay 0 to OFF on mock server...');
-  try {
-    await axios.post('http://localhost:3100/set-relay', {
-      relayId: 0,
-      state: false
-    });
-    console.log('   ✓ Relay 0 set to OFF on mock server');
-  } catch (error) {
-    console.error('   ❌ Failed to set relay:', error.message);
-  }
-
+  await setMockRelay(0, false);
   await sleep(1000);
+
+  console.log('\n📋 Checking status...');
+  await printStatus();
 
   console.log('\n📋 Expected results:');
   console.log('   - Network disconnection detected');
@@ -452,6 +554,7 @@ async function main() {
 
 // Export for use as module
 module.exports = {
+  // Scenarios
   scenario1_normalOperation,
   scenario2_progressiveOverload,
   scenario3_immediateShedding,
@@ -462,8 +565,17 @@ module.exports = {
   scenario8_ethernetDisconnection,
   scenario9_ethernetReconnection,
   runAllScenarios,
+
+  // Injection helpers
   injectStatus,
-  injectETH
+  injectETH,
+
+  // Status & control helpers
+  getShellyStatus,
+  getMockServerStatus,
+  setMockRelay,
+  setMockOnline,
+  printStatus
 };
 
 // Run if called directly

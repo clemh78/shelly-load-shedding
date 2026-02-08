@@ -34,6 +34,66 @@ Tests d'intégration pour `load-shedder.js` s'exécutant sur un **Shelly Pro 3EM
    - Injecte des mesures EM via HTTP
    - Observe les résultats via logs et MQTT
 
+## 🔧 API Endpoints
+
+### Shelly Load-Shedder (TEST_MODE)
+
+1. **POST** `/script/{SCRIPT_ID}/inject-status` - Injecter des données de test
+   ```bash
+   # Injecter des courants EM
+   curl -X POST http://192.168.1.100/script/1/inject-status \
+     -d '{"component":"em:0","delta":{"a_current":29,"b_current":20,"c_current":20}}'
+
+   # Injecter état Ethernet
+   curl -X POST http://192.168.1.100/script/1/inject-status \
+     -d '{"component":"eth","delta":{"ip":"10.0.0.100"}}'
+   ```
+
+2. **GET** `/script/{SCRIPT_ID}/get-status` - Récupérer l'état complet du load-shedder
+   ```bash
+   curl http://192.168.1.100/script/1/get-status
+   ```
+
+### Mock Server (Pro3)
+
+1. **GET** `/status` - État des relays
+2. **POST** `/set-relay` - Changer état d'un relay
+   ```bash
+   curl -X POST http://localhost:3100/set-relay -d '{"relayId":0,"state":false}'
+   ```
+3. **POST** `/set-online` - Simuler Pro3 offline/online
+   ```bash
+   curl -X POST http://localhost:3100/set-online -d '{"online":false}'
+   ```
+
+## 🛠️ Helper Functions
+
+Le fichier `scenarios.js` expose des helpers pour construire vos propres tests:
+
+```javascript
+const {
+  // Injection
+  injectStatus,        // Injecter courants EM: injectStatus(L1, L2, L3)
+  injectETH,          // Injecter état Ethernet: injectETH(connected)
+
+  // Status
+  getShellyStatus,    // État complet du load-shedder
+  getMockServerStatus, // État des relays du mock
+  printStatus,        // Afficher tout l'état de façon lisible
+
+  // Control
+  setMockRelay,       // Changer état d'un relay: setMockRelay(relayId, state)
+  setMockOnline       // Simuler Pro3 online/offline: setMockOnline(online)
+} = require('./scenarios.js');
+
+// Exemple d'utilisation
+await injectStatus(29, 20, 20);  // L1=29A, L2=20A, L3=20A
+await sleep(3000);
+const status = await getShellyStatus();
+console.log('L1 state:', status.state.l1.state);
+await printStatus();  // Affiche tout l'état
+```
+
 ## 📋 Prérequis
 
 1. **Shelly Pro 3EM** accessible sur le réseau

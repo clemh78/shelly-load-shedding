@@ -828,7 +828,65 @@ function setupTestMode() {
     }
   });
 
-  log("🧪 TEST: HTTP endpoint available at /script/[SCRIPT_ID]/inject-status");
+  // Expose HTTP endpoint to get current state
+  HTTPServer.registerEndpoint("get-status", function(_request, response) {
+    try {
+      response.code = 200;
+      response.body = JSON.stringify({
+        success: true,
+        timestamp: Date.now(),
+        state: {
+          l1: {
+            state: state.l1.state,
+            current: state.l1.current,
+            overloadStartTime: state.l1.overloadStartTime,
+            restorationStartTime: state.l1.restorationStartTime,
+            sheddingCount: state.l1.sheddingCount
+          },
+          l2: {
+            state: state.l2.state,
+            current: state.l2.current,
+            overloadStartTime: state.l2.overloadStartTime,
+            restorationStartTime: state.l2.restorationStartTime,
+            sheddingCount: state.l2.sheddingCount
+          },
+          l3: {
+            state: state.l3.state,
+            current: state.l3.current,
+            overloadStartTime: state.l3.overloadStartTime,
+            restorationStartTime: state.l3.restorationStartTime,
+            sheddingCount: state.l3.sheddingCount
+          },
+          pro3: {
+            online: state.pro3Online,
+            lastHeartbeat: state.pro3LastHeartbeat,
+            relays: {
+              l1: state.l1.relayState,
+              l2: state.l2.relayState,
+              l3: state.l3.relayState
+            }
+          },
+          network: {
+            connected: state.networkConnected
+          }
+        }
+      });
+
+      log("🧪 TEST: Status retrieved via HTTP endpoint");
+
+    } catch (error) {
+      response.code = 500;
+      response.body = JSON.stringify({
+        success: false,
+        error: String(error)
+      });
+      logError("TEST: Failed to get status: " + String(error));
+    }
+  });
+
+  log("🧪 TEST: HTTP endpoints available:");
+  log("  - POST /script/[SCRIPT_ID]/inject-status");
+  log("  - GET  /script/[SCRIPT_ID]/get-status");
 }
 
 // ============================================================================
