@@ -9,7 +9,7 @@
  ******************************************************************************/
 
 let CONFIG = {
-  VERSION: "1.7",
+  VERSION: "2.0",
   MQTT_TOPIC_PREFIX: "load-shedding-dev",
   PUBLISH_DELAY: 300
 };
