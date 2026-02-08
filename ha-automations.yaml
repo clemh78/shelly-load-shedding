@@ -6,38 +6,39 @@
   trigger:
     - platform: state
       entity_id:
-        - binary_sensor.load_shedder_l1_active
-        - binary_sensor.load_shedder_l2_active
-        - binary_sensor.load_shedder_l3_active
+        - binary_sensor.load_shedder_l1_shedding
+        - binary_sensor.load_shedder_l2_shedding
+        - binary_sensor.load_shedder_l3_shedding
       from: "off"
       to: "on"
       id: shedding
     - platform: state
       entity_id:
-        - binary_sensor.load_shedder_l1_active
-        - binary_sensor.load_shedder_l2_active
-        - binary_sensor.load_shedder_l3_active
+        - binary_sensor.load_shedder_l1_shedding
+        - binary_sensor.load_shedder_l2_shedding
+        - binary_sensor.load_shedder_l3_shedding
       from: "on"
       to: "off"
       id: restoration
   action:
     - service: notify.mobile_app_iphone_de_clement
       data:
-        title: >
-          {% set phase = trigger.to_state.name %}
+        title: >-
           {% if trigger.id == 'shedding' %}
-            ⚠️ Délestage - {{ phase }}
+          ⚠️ Délestage - {{ trigger.to_state.name }}
           {% else %}
-            ✅ Restauration - {{ phase }}
+          ✅ Restauration - {{ trigger.to_state.name }}
           {% endif %}
-        message: >
-          {% set base = trigger.to_state.object_id | replace('_active', '') %}
+        message: >-
+          {% set base = trigger.to_state.object_id | replace('_shedding', '') %}
           Courant: {{ states('sensor.' ~ base ~ '_current') }} A
-          Status: {{ states('sensor.' ~ base ~ '_status') }}
+          Relais: {{ states('binary_sensor.' ~ base ~ '_relay') }}
+          Délestages: {{ states('sensor.' ~ base ~ '_shedding_count') }}
         data:
           priority: high
           ttl: 0
-          color: "{{ 'red' if trigger.id == 'shedding' else 'green' }}"
+          color: >-
+            {{ 'red' if trigger.id == 'shedding' else 'green' }}
   mode: queued
   max: 10
 
