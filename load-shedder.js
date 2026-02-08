@@ -802,10 +802,7 @@ function setupTestMode() {
         delta: data.delta || data
       };
 
-      // Call the same handlers as production
-      handleEMStatusUpdate(msg);
-      handleETHStatusUpdate(msg);
-
+      // Send HTTP response immediately
       response.code = 200;
       response.body = JSON.stringify({
         success: true,
@@ -814,6 +811,13 @@ function setupTestMode() {
       });
 
       log("🧪 TEST: Status injected via HTTP endpoint");
+
+      // Process handlers asynchronously (after HTTP response)
+      Timer.set(0, false, function() {
+        handleEMStatusUpdate(msg);
+        handleETHStatusUpdate(msg);
+      });
+
     } catch (error) {
       response.code = 400;
       response.body = JSON.stringify({
