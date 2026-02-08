@@ -6,12 +6,12 @@
 const axios = require('axios');
 
 // Configuration
-const SHELLY_IP = process.env.SHELLY_IP || "192.168.1.100";
-const SHELLY_SCRIPT_ID = process.env.SHELLY_SCRIPT_ID || "1";
+const SHELLY_IP = process.env.SHELLY_IP || "192.168.1.102";
+const SHELLY_SCRIPT_ID = process.env.SHELLY_SCRIPT_ID || "2";
 const SHELLY_BASE_URL = `http://${SHELLY_IP}`;
 const INJECT_ENDPOINT = `${SHELLY_BASE_URL}/script/${SHELLY_SCRIPT_ID}/inject-status`;
 const GET_STATUS_ENDPOINT = `${SHELLY_BASE_URL}/script/${SHELLY_SCRIPT_ID}/get-status`;
-const MOCK_SERVER_URL = process.env.MOCK_SERVER_URL || "http://localhost:3100";
+const MOCK_SERVER_URL = process.env.MOCK_SERVER_URL || "http://192.168.1.100:3100";
 
 // Helper functions
 async function sleep(ms) {
@@ -65,7 +65,7 @@ async function injectETH(connected) {
 async function getShellyStatus() {
   try {
     const response = await axios.get(GET_STATUS_ENDPOINT);
-    return response.data;
+    return response.data.data;
   } catch (error) {
     console.error(`   ❌ Failed to get Shelly status: ${error.message}`);
     throw error;
@@ -121,34 +121,36 @@ async function setMockOnline(online) {
 /**
  * Print detailed status from both Shelly and Mock Server
  */
-async function printStatus() {
+async function printStatus(shellyStatus, mockStatus) {
   console.log('\n📊 Current Status:');
 
   try {
-    const shellyStatus = await getShellyStatus();
-    const mockStatus = await getMockServerStatus();
-
     console.log('\n🔌 Shelly Load-Shedder:');
-    console.log(`   Network: ${shellyStatus.state.network.connected ? '✅ Connected' : '❌ Disconnected'}`);
-    console.log(`   Pro3: ${shellyStatus.state.pro3.online ? '✅ Online' : '❌ Offline'}`);
+    console.log(`   Pro3: ${shellyStatus.pro3_online ? '✅ Online' : '❌ Offline'}`);
 
     console.log('\n   L1:');
-    console.log(`     State: ${shellyStatus.state.l1.state}`);
-    console.log(`     Current: ${shellyStatus.state.l1.current}A`);
-    console.log(`     Relay (desired): ${shellyStatus.state.pro3.relays.l1}`);
-    console.log(`     Shedding count: ${shellyStatus.state.l1.sheddingCount}`);
+    console.log(`     Overload: ${shellyStatus.l1_overload}`);
+    console.log(`     Shedding: ${shellyStatus.l1_shedding}`);
+    console.log(`     Relay: ${shellyStatus.l1_relay_status}`);
+    console.log(`     Current: ${shellyStatus.l1_current}A`);
+    console.log(`     Last shedding: ${shellyStatus.l1_last_shedding}`);
+    console.log(`     Shedding count: ${shellyStatus.l1_shedding_count}`);
 
     console.log('\n   L2:');
-    console.log(`     State: ${shellyStatus.state.l2.state}`);
-    console.log(`     Current: ${shellyStatus.state.l2.current}A`);
-    console.log(`     Relay (desired): ${shellyStatus.state.pro3.relays.l2}`);
-    console.log(`     Shedding count: ${shellyStatus.state.l2.sheddingCount}`);
+    console.log(`     Overload: ${shellyStatus.l2_overload}`);
+    console.log(`     Shedding: ${shellyStatus.l2_shedding}`);
+    console.log(`     Relay: ${shellyStatus.l2_relay_status}`);
+    console.log(`     Current: ${shellyStatus.l2_current}A`);
+    console.log(`     Last shedding: ${shellyStatus.l2_last_shedding}`);
+    console.log(`     Shedding count: ${shellyStatus.l2_shedding_count}`);
 
     console.log('\n   L3:');
-    console.log(`     State: ${shellyStatus.state.l3.state}`);
-    console.log(`     Current: ${shellyStatus.state.l3.current}A`);
-    console.log(`     Relay (desired): ${shellyStatus.state.pro3.relays.l3}`);
-    console.log(`     Shedding count: ${shellyStatus.state.l3.sheddingCount}`);
+    console.log(`     Overload: ${shellyStatus.l3_overload}`);
+    console.log(`     Shedding: ${shellyStatus.l3_shedding}`);
+    console.log(`     Relay: ${shellyStatus.l3_relay_status}`);
+    console.log(`     Current: ${shellyStatus.l3_current}A`);
+    console.log(`     Last shedding: ${shellyStatus.l3_last_shedding}`);
+    console.log(`     Shedding count: ${shellyStatus.l3_shedding_count}`);
 
     console.log('\n🔌 Mock Server (Pro3):');
     console.log(`   Online: ${mockStatus.online ? '✅' : '❌'}`);
@@ -183,12 +185,29 @@ async function scenario1_normalOperation() {
   await injectStatus(20, 20, 20);
   await sleep(1000);
 
-  console.log('\n📋 Expected results:');
-  console.log('   - All phases should remain ON');
-  console.log('   - No overload detected');
-  console.log('   - No shedding events');
+  const shellyStatus = await getShellyStatus();
+  const mockStatus = await getMockServerStatus();
 
-  console.log('\n💡 Check Shelly logs and MQTT messages to verify');
+  if(shellyStatus.l1_shedding || shellyStatus.l2_shedding || shellyStatus.l3_shedding){
+    console.error(`   ❌ One phase has shedding is progress`);
+    printStatus(shellyStatus, mockStatus);
+    return false;
+  }
+
+  if(shellyStatus.l1_overload || shellyStatus.l2_overload || shellyStatus.l3_overload){
+    console.error(`   ❌ One phase is overloaded`);
+    printStatus(shellyStatus, mockStatus);
+    return false;
+  }
+
+  if(!mockStatus.relays[0] || !mockStatus.relays[1] || !mockStatus.relays[2]){
+    console.error(`   ❌ One relay is not active`);
+    printStatus(shellyStatus, mockStatus);
+    return false;
+  }
+
+  console.error(`   ✅ All is good`);
+  printStatus(shellyStatus, mockStatus);
   return true;
 }
 
@@ -206,9 +225,27 @@ async function scenario2_progressiveOverload() {
   await injectStatus(29, 20, 20);
   await sleep(500);
 
-  console.log('\n📋 At this point:');
-  console.log('   - L1 should be marked as OVERLOAD');
-  console.log('   - L1 should still be ON (waiting for delay)');
+  let shellyStatus = await getShellyStatus();
+  let mockStatus = await getMockServerStatus();
+  let sheddingCountBefore = shellyStatus.l1_shedding_count;
+  
+  if(!shellyStatus.l1_overload){
+    console.error(`   ❌ L1 need to be overloaded`);
+    printStatus(shellyStatus, mockStatus);
+    return false;
+  }
+
+  if(shellyStatus.l1_shedding){
+    console.error(`   ❌ L1 must not sheeded`);
+    printStatus(shellyStatus, mockStatus);
+    return false;
+  }
+
+  if(!mockStatus.relays[0]){
+    console.error(`   ❌ Relay of L1 need to be ON`);
+    printStatus(shellyStatus, mockStatus);
+    return false;
+  }
 
   console.log('\n⏳ Step 3: Waiting for shedding delay (2.5s)...');
   await sleep(2500);
@@ -217,13 +254,63 @@ async function scenario2_progressiveOverload() {
   await injectStatus(29, 20, 20);
   await sleep(500);
 
-  console.log('\n📋 Expected results:');
-  console.log('   - L1 should be SHED (OFF)');
-  console.log('   - L1 relay should be OFF');
-  console.log('   - MQTT event "normal_shedding" published');
-  console.log('   - Shedding count incremented');
+  shellyStatus = await getShellyStatus();
+  mockStatus = await getMockServerStatus();
+  
+  if(!shellyStatus.l1_overload){
+    console.error(`   ❌ L1 need to be overloaded`);
+    printStatus(shellyStatus, mockStatus);
+    return false;
+  }
 
-  console.log('\n💡 Check Shelly logs and MQTT messages to verify');
+  if(!shellyStatus.l1_shedding){
+    console.error(`   ❌ L1 need to be sheeded`);
+    printStatus(shellyStatus, mockStatus);
+    return false;
+  }
+
+  if(shellyStatus.l1_shedding_count <= sheddingCountBefore){
+    console.error(`   ❌ L1 Shedding count has not be increment`);
+    printStatus(shellyStatus, mockStatus);
+    return false;
+  }
+
+  if(mockStatus.relays[0]){
+    console.error(`   ❌ Relay of L1 need to be OFF`);
+    printStatus(shellyStatus, mockStatus);
+    return false;
+  }
+
+  console.log('\n⏳ Step 5: Waiting for restauration (10s)...');
+  await sleep(10000);
+
+  console.log('\n📤 Step 6: Back to normal current (20A)...');
+  await injectStatus(20, 20, 20);
+  await sleep(1000);
+
+  shellyStatus = await getShellyStatus();
+  mockStatus = await getMockServerStatus();
+  
+  if(shellyStatus.l1_shedding || shellyStatus.l2_shedding || shellyStatus.l3_shedding){
+    console.error(`   ❌ One phase has shedding is progress`);
+    printStatus(shellyStatus, mockStatus);
+    return false;
+  }
+
+  if(shellyStatus.l1_overload || shellyStatus.l2_overload || shellyStatus.l3_overload){
+    console.error(`   ❌ One phase is overloaded`);
+    printStatus(shellyStatus, mockStatus);
+    return false;
+  }
+
+  if(!mockStatus.relays[0] || !mockStatus.relays[1] || !mockStatus.relays[2]){
+    console.error(`   ❌ One relay is not active`);
+    printStatus(shellyStatus, mockStatus);
+    return false;
+  }
+
+  console.error(`   ✅ All is good`);
+  printStatus(shellyStatus, mockStatus);
   return true;
 }
 
@@ -241,40 +328,58 @@ async function scenario3_immediateShedding() {
   await injectStatus(20, 35, 20);
   await sleep(1000);
 
-  console.log('\n📋 Expected results:');
-  console.log('   - L2 should be SHED IMMEDIATELY (no delay)');
-  console.log('   - L2 relay should be OFF');
-  console.log('   - MQTT event "immediate_shedding" published');
+  
+  let shellyStatus = await getShellyStatus();
+  let mockStatus = await getMockServerStatus();
+  
+  if(!shellyStatus.l2_overload){
+    console.error(`   ❌ L2 need to be overloaded`);
+    printStatus(shellyStatus, mockStatus);
+    return false;
+  }
 
-  console.log('\n💡 Check Shelly logs and MQTT messages to verify');
-  return true;
-}
+  if(!shellyStatus.l2_shedding){
+    console.error(`   ❌ L2 need to be sheeded`);
+    printStatus(shellyStatus, mockStatus);
+    return false;
+  }
 
-// ============================================================================
-// SCENARIO 4: Restoration (Note: requires 5min wait by default)
-// ============================================================================
-async function scenario4_restoration() {
-  printHeader('SCENARIO 4: Restoration After Delay');
+  if(mockStatus.relays[1]){
+    console.error(`   ❌ Relay of L2 need to be OFF`);
+    printStatus(shellyStatus, mockStatus);
+    return false;
+  }
 
-  console.log('\n📤 Step 1: Trigger immediate shedding on L3 (35A)...');
-  await injectStatus(20, 20, 35);
+  console.log('\n⏳ Step 3: Waiting for restauration (10s)...');
+  await sleep(10000);
+
+  console.log('\n📤 Step 4: Back to normal current (20A)...');
+  await injectStatus(20, 20, 20);
   await sleep(1000);
 
-  console.log('\n📋 L3 should be SHED');
+  shellyStatus = await getShellyStatus();
+  mockStatus = await getMockServerStatus();
+  
+  if(shellyStatus.l1_shedding || shellyStatus.l2_shedding || shellyStatus.l3_shedding){
+    console.error(`   ❌ One phase has shedding is progress`);
+    printStatus(shellyStatus, mockStatus);
+    return false;
+  }
 
-  console.log('\n📤 Step 2: Reduce L3 current to 25A (below 26A restoration threshold)...');
-  await injectStatus(20, 20, 25);
-  await sleep(1000);
+  if(shellyStatus.l1_overload || shellyStatus.l2_overload || shellyStatus.l3_overload){
+    console.error(`   ❌ One phase is overloaded`);
+    printStatus(shellyStatus, mockStatus);
+    return false;
+  }
 
-  console.log('\n📋 Expected results:');
-  console.log('   - L3 should still be OFF (restoration delay = 5min by default)');
-  console.log('   - After 5 minutes of low current, L3 should restore automatically');
+  if(!mockStatus.relays[0] || !mockStatus.relays[1] || !mockStatus.relays[2]){
+    console.error(`   ❌ One relay is not active`);
+    printStatus(shellyStatus, mockStatus);
+    return false;
+  }
 
-  console.log('\n⚠️  Note: Full restoration test requires 5 minutes wait!');
-  console.log('   Consider reducing CONFIG.RESTORATION_DELAY for testing.');
-  console.log('   Or wait 5 minutes and inject another status update to trigger check.');
-
-  console.log('\n💡 Check Shelly logs and MQTT messages to verify');
+  console.error(`   ✅ All is good`);
+  printStatus(shellyStatus, mockStatus);
   return true;
 }
 
@@ -378,9 +483,6 @@ async function scenario8_ethernetDisconnection() {
   await setMockRelay(0, false);
   await sleep(1000);
 
-  console.log('\n📋 Checking status...');
-  await printStatus();
-
   console.log('\n📋 Expected results:');
   console.log('   - Network disconnection detected');
   console.log('   - MQTT event "network_disconnected" published');
@@ -432,7 +534,6 @@ async function showMenu() {
   console.log('   1 - Normal Operation');
   console.log('   2 - Progressive Overload');
   console.log('   3 - Immediate Shedding');
-  console.log('   4 - Restoration');
   console.log('   5 - Pro3 Connection Loss');
   console.log('   6 - Multi-Phase Overload');
   console.log('   7 - Overload Cancellation');
@@ -453,9 +554,6 @@ async function runScenario(choice) {
         break;
       case '3':
         await scenario3_immediateShedding();
-        break;
-      case '4':
-        await scenario4_restoration();
         break;
       case '5':
         await scenario5_pro3Offline();
@@ -489,7 +587,6 @@ async function runAllScenarios() {
     { name: 'Scenario 1: Normal Operation', fn: scenario1_normalOperation },
     { name: 'Scenario 2: Progressive Overload', fn: scenario2_progressiveOverload },
     { name: 'Scenario 3: Immediate Shedding', fn: scenario3_immediateShedding },
-    { name: 'Scenario 4: Restoration', fn: scenario4_restoration },
     { name: 'Scenario 5: Pro3 Offline', fn: scenario5_pro3Offline },
     { name: 'Scenario 6: Multi-Phase Overload', fn: scenario6_multiPhaseOverload },
     { name: 'Scenario 7: Overload Cancellation', fn: scenario7_overloadCancellation },
@@ -558,7 +655,6 @@ module.exports = {
   scenario1_normalOperation,
   scenario2_progressiveOverload,
   scenario3_immediateShedding,
-  scenario4_restoration,
   scenario5_pro3Offline,
   scenario6_multiPhaseOverload,
   scenario7_overloadCancellation,

@@ -15,7 +15,7 @@ let CONFIG = {
   VERSION: "2.0",
 
   // Network addresses (leave empty for simulation mode)
-  PRO3_IP: "192.168.1.103",                // Set to Pro 3EM IP (e.g., "10.0.0.101") or leave empty for simulation
+  PRO3_IP: "192.168.1.100:3100",                // Set to Pro 3EM IP (e.g., "10.0.0.101") or leave empty for simulation
   PRO3_SCRIPT_ID: 1,                       // Script ID on Pro 3 (HTTPServer endpoint is /script/{ID}/heartbeat)
 
   // ⚡ PHASE CONFIGURATION
@@ -32,15 +32,15 @@ let CONFIG = {
 
   // Timings
   SHEDDING_DELAY: 2000,         // 2s delay before shedding (circuit breaker tolerates peaks)
-  RESTORATION_DELAY: 300000,    // 5min (300s) before restoring
+  RESTORATION_DELAY: 10000,    // 5min (300s) before restoring
 
   // Debug mode
   DEBUG: true,
   DEBUG_MQTT: false,                // Enable verbose MQTT logs (separate from DEBUG)
-  DRY_RUN: true,                   // Dry run mode: heartbeat works but relay commands are simulated
+  DRY_RUN: false,                   // Dry run mode: heartbeat works but relay commands are simulated
 
   // 🧪 TEST MODE
-  TEST_MODE: false,                 // Enable test mode: exposes HTTP endpoint for status injection
+  TEST_MODE: true,                 // Enable test mode: exposes HTTP endpoint for status injection
 
   // 📡 MQTT
   MQTT_ENABLED: true,         // Enable MQTT publishing
@@ -780,6 +780,7 @@ function stopHeartbeat() {
 
   Timer.clear(state.heartbeatTimerId);
   state.heartbeatTimerId = null;
+  state.heartbeatInProgress = false;
 }
 
 // ============================================================================
@@ -801,6 +802,9 @@ function setupTestMode() {
         component: data.component || "em:0",
         delta: data.delta || data
       };
+      
+      handleEMStatusUpdate(msg);
+      handleETHStatusUpdate(msg);
 
       // Send HTTP response immediately
       response.code = 200;
@@ -810,20 +814,17 @@ function setupTestMode() {
         timestamp: Date.now()
       });
 
+      response.send();
+
       log("🧪 TEST: Status injected via HTTP endpoint");
-
-      // Process handlers asynchronously (after HTTP response)
-      Timer.set(0, false, function() {
-        handleEMStatusUpdate(msg);
-        handleETHStatusUpdate(msg);
-      });
-
     } catch (error) {
       response.code = 400;
       response.body = JSON.stringify({
         success: false,
         error: String(error)
       });
+
+      response.send();
       logError("TEST: Failed to inject status: " + String(error));
     }
   });
@@ -831,47 +832,35 @@ function setupTestMode() {
   // Expose HTTP endpoint to get current state
   HTTPServer.registerEndpoint("get-status", function(_request, response) {
     try {
+      let statusData = {};
+      for (let phaseName in state.phases) {
+        let phaseState = state.phases[phaseName];
+
+        // Add to global status
+        let phaseKey = phaseName.toLowerCase();
+        statusData[phaseKey + "_overload"] = phaseState.overload;
+        statusData[phaseKey + "_shedding"] = !phaseState.active;
+        statusData[phaseKey + "_relay_status"] = phaseState.relay_status;
+        statusData[phaseKey + "_current"] = phaseState.current;
+        statusData[phaseKey + "_last_shedding"] = phaseState.lastShedding || null;
+        statusData[phaseKey + "_shedding_count"] = phaseState.sheddingCount;
+      }
+
+      // Add Pro 3 online status, versions, and global thresholds
+      statusData.pro3_online = state.pro3.online;
+      statusData.pro3_version = state.pro3.version;
+      statusData.pro3em_version = CONFIG.VERSION;
+      statusData.shedding_threshold = CONFIG.SHEDDING_THRESHOLD;
+      statusData.restoration_threshold = CONFIG.RESTORATION_THRESHOLD;
+      
       response.code = 200;
       response.body = JSON.stringify({
         success: true,
         timestamp: Date.now(),
-        state: {
-          l1: {
-            state: state.l1.state,
-            current: state.l1.current,
-            overloadStartTime: state.l1.overloadStartTime,
-            restorationStartTime: state.l1.restorationStartTime,
-            sheddingCount: state.l1.sheddingCount
-          },
-          l2: {
-            state: state.l2.state,
-            current: state.l2.current,
-            overloadStartTime: state.l2.overloadStartTime,
-            restorationStartTime: state.l2.restorationStartTime,
-            sheddingCount: state.l2.sheddingCount
-          },
-          l3: {
-            state: state.l3.state,
-            current: state.l3.current,
-            overloadStartTime: state.l3.overloadStartTime,
-            restorationStartTime: state.l3.restorationStartTime,
-            sheddingCount: state.l3.sheddingCount
-          },
-          pro3: {
-            online: state.pro3Online,
-            lastHeartbeat: state.pro3LastHeartbeat,
-            relays: {
-              l1: state.l1.relayState,
-              l2: state.l2.relayState,
-              l3: state.l3.relayState
-            }
-          },
-          network: {
-            connected: state.networkConnected
-          }
-        }
+        data: statusData
       });
 
+      response.send();
       log("🧪 TEST: Status retrieved via HTTP endpoint");
 
     } catch (error) {
@@ -880,6 +869,7 @@ function setupTestMode() {
         success: false,
         error: String(error)
       });
+      response.send();
       logError("TEST: Failed to get status: " + String(error));
     }
   });
