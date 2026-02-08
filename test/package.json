@@ -1,0 +1,20 @@
+{
+  "name": "shelly-load-shedding-tests",
+  "version": "1.0.0",
+  "description": "Integration tests for Shelly Load Shedding",
+  "scripts": {
+    "test": "bash run-tests.sh",
+    "test:server": "node test-server.js",
+    "test:scenarios": "node scenarios.js"
+  },
+  "keywords": [
+    "shelly",
+    "load-shedding",
+    "test"
+  ],
+  "author": "Clément Hémidy",
+  "license": "MIT",
+  "dependencies": {
+    "axios": "^1.6.0"
+  }
+}

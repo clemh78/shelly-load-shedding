@@ -39,6 +39,9 @@ let CONFIG = {
   DEBUG_MQTT: false,                // Enable verbose MQTT logs (separate from DEBUG)
   DRY_RUN: true,                   // Dry run mode: heartbeat works but relay commands are simulated
 
+  // 🧪 TEST MODE
+  TEST_MODE: false,                 // Enable test mode: exposes HTTP endpoint for status injection
+
   // 📡 MQTT
   MQTT_ENABLED: true,         // Enable MQTT publishing
   // MQTT_TOPIC_PREFIX: "load-shedding-14335cc56020",  // MQTT topic prefix
@@ -763,10 +766,6 @@ function handleHeartbeat() {
   });
 }
 
-// ============================================================================
-// STARTUP
-// ============================================================================
-
 function startHeartbeat() {
   if (state.heartbeatTimerId !== null) return;
 
@@ -783,14 +782,70 @@ function stopHeartbeat() {
   state.heartbeatTimerId = null;
 }
 
+// ============================================================================
+// TEST MODE HTTP ENDPOINT
+// ============================================================================
+
+function setupTestMode() {
+  if (!CONFIG.TEST_MODE) return;
+
+  log("🧪 TEST MODE ENABLED - Registering HTTP endpoint for status injection");
+
+  // Expose HTTP endpoint for test status injection
+  HTTPServer.registerEndpoint("inject-status", function(request, response) {
+    try {
+      let data = JSON.parse(request.body);
+
+      // Build message in same format as Shelly.addStatusHandler
+      let msg = {
+        component: data.component || "em:0",
+        delta: data.delta || data
+      };
+
+      // Call the same handlers as production
+      handleEMStatusUpdate(msg);
+      handleETHStatusUpdate(msg);
+
+      response.code = 200;
+      response.body = JSON.stringify({
+        success: true,
+        message: "Status injected",
+        timestamp: Date.now()
+      });
+
+      log("🧪 TEST: Status injected via HTTP endpoint");
+    } catch (error) {
+      response.code = 400;
+      response.body = JSON.stringify({
+        success: false,
+        error: String(error)
+      });
+      logError("TEST: Failed to inject status: " + String(error));
+    }
+  });
+
+  log("🧪 TEST: HTTP endpoint available at /script/[SCRIPT_ID]/inject-status");
+}
+
+// ============================================================================
+// STARTUP
+// ============================================================================
+
 init(function() {
   if(state.ethernetConnected){
     startHeartbeat();
   }
 
-  Shelly.addStatusHandler(function(msg) {
-    handleEMStatusUpdate(msg);
-    handleETHStatusUpdate(msg);
-  });
-  log("Status handler registered for EM:0 updates and network changes");
+  // Register status handler only in production mode
+  // In test mode, status updates come via HTTP endpoint
+  if (!CONFIG.TEST_MODE) {
+    Shelly.addStatusHandler(function(msg) {
+      handleEMStatusUpdate(msg);
+      handleETHStatusUpdate(msg);
+    });
+    log("Status handler registered for EM:0 updates and network changes");
+  } else {
+    setupTestMode();
+    log("🧪 TEST MODE: Status handler disabled (using HTTP endpoint instead)");
+  }
 });
