@@ -699,7 +699,7 @@ function handleETHStatusUpdate(msg) {
   // Use delta if available, otherwise use full info
   let ethData = msg.delta || msg.info;
   if (!ethData) return;
-  if (ethData.ip == undefined) return;
+  if (ethData.ip === undefined) return;
 
   let wasConnected = state.ethernetConnected;
   let isConnected = ethData.ip !== null;
