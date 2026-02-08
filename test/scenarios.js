@@ -257,6 +257,58 @@ async function scenario7_overloadCancellation() {
 }
 
 // ============================================================================
+// SCENARIO 8: Ethernet Disconnection
+// ============================================================================
+async function scenario8_ethernetDisconnection() {
+  printHeader('SCENARIO 8: Ethernet Disconnection');
+
+  console.log('\n📤 Step 1: Simulating Ethernet disconnection...');
+  await injectETH(false);
+  await sleep(1000);
+
+  console.log('\n📤 Step 2: Setting relay 0 to OFF on mock server...');
+  try {
+    await axios.post('http://localhost:3100/set-relay', {
+      relayId: 0,
+      state: false
+    });
+    console.log('   ✓ Relay 0 set to OFF on mock server');
+  } catch (error) {
+    console.error('   ❌ Failed to set relay:', error.message);
+  }
+
+  await sleep(1000);
+
+  console.log('\n📋 Expected results:');
+  console.log('   - Network disconnection detected');
+  console.log('   - MQTT event "network_disconnected" published');
+  console.log('   - Relay 0 manually set to OFF on Pro3 mock');
+
+  console.log('\n💡 Check Shelly logs and MQTT messages to verify');
+  return true;
+}
+
+// ============================================================================
+// SCENARIO 9: Ethernet Reconnection
+// ============================================================================
+async function scenario9_ethernetReconnection() {
+  printHeader('SCENARIO 9: Ethernet Reconnection');
+
+  console.log('\n📤 Step 1: Simulating Ethernet reconnection...');
+  await injectETH(true);
+  await sleep(1000);
+
+  console.log('\n📋 Expected results:');
+  console.log('   - Network reconnection detected');
+  console.log('   - MQTT event "network_connected" published');
+  console.log('   - Pro3 heartbeat should resume');
+  console.log('   - Relay synchronization should be triggered');
+
+  console.log('\n💡 Check Shelly logs and MQTT messages to verify');
+  return true;
+}
+
+// ============================================================================
 // Interactive Menu
 // ============================================================================
 async function showMenu() {
@@ -282,6 +334,8 @@ async function showMenu() {
   console.log('   5 - Pro3 Connection Loss');
   console.log('   6 - Multi-Phase Overload');
   console.log('   7 - Overload Cancellation');
+  console.log('   8 - Ethernet Disconnection');
+  console.log('   9 - Ethernet Reconnection');
   console.log('   A - Run all scenarios');
   console.log('   Q - Quit\n');
 }
@@ -310,6 +364,12 @@ async function runScenario(choice) {
       case '7':
         await scenario7_overloadCancellation();
         break;
+      case '8':
+        await scenario8_ethernetDisconnection();
+        break;
+      case '9':
+        await scenario9_ethernetReconnection();
+        break;
       case 'A':
       case 'a':
         await runAllScenarios();
@@ -330,7 +390,9 @@ async function runAllScenarios() {
     { name: 'Scenario 4: Restoration', fn: scenario4_restoration },
     { name: 'Scenario 5: Pro3 Offline', fn: scenario5_pro3Offline },
     { name: 'Scenario 6: Multi-Phase Overload', fn: scenario6_multiPhaseOverload },
-    { name: 'Scenario 7: Overload Cancellation', fn: scenario7_overloadCancellation }
+    { name: 'Scenario 7: Overload Cancellation', fn: scenario7_overloadCancellation },
+    { name: 'Scenario 8: Ethernet Disconnection', fn: scenario8_ethernetDisconnection },
+    { name: 'Scenario 9: Ethernet Reconnection', fn: scenario9_ethernetReconnection }
   ];
 
   console.log('\n🚀 Running all scenarios...\n');
@@ -397,6 +459,8 @@ module.exports = {
   scenario5_pro3Offline,
   scenario6_multiPhaseOverload,
   scenario7_overloadCancellation,
+  scenario8_ethernetDisconnection,
+  scenario9_ethernetReconnection,
   runAllScenarios,
   injectStatus,
   injectETH
