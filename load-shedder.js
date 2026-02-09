@@ -312,7 +312,7 @@ function sendHeartbeat(onComplete) {
 
   state.heartbeatInProgress = true;
 
-  let safetyTimeout = CONFIG.HTTP_TIMEOUT * 3;
+  let safetyTimeout = CONFIG.HTTP_TIMEOUT * 2;
   let safetyTimer = Timer.set(safetyTimeout, false, function() {
     if (state.heartbeatInProgress) {
       state.heartbeatInProgress = false;
