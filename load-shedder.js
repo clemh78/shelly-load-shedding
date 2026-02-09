@@ -534,7 +534,7 @@ function pro3NowOnline(){
   state.pro3.online = true;
   state.pro3.consecutiveFailures = 0;
 
-  syncRelayStates();
+  Timer.set(0, false, syncRelayStates);
 }
 
 function pro3NowOffline(){
