@@ -324,6 +324,8 @@ function sendHeartbeat(onComplete) {
   let url = "http://" + CONFIG.PRO3_IP + "/script/" + CONFIG.PRO3_SCRIPT_ID + "/heartbeat";
   Shelly.call("HTTP.GET", buildHttpGetParams(url), function(result, error_code, error_message) { 
     Timer.clear(safetyTimer);
+    
+    if (!state.heartbeatInProgress) return;
 
     if (error_code !== 0 || !result || result.code !== 200) {
       let errorReason = error_code !== 0 ? error_message : "HTTP " + (result ? result.code : "no_response");
@@ -772,7 +774,6 @@ function stopHeartbeat() {
 
   Timer.clear(state.heartbeatTimerId);
   state.heartbeatTimerId = null;
-  state.heartbeatInProgress = false;
 }
 
 // ============================================================================
