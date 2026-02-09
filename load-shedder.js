@@ -15,7 +15,7 @@ let CONFIG = {
   VERSION: "2.0",
 
   // Network addresses (leave empty for simulation mode)
-  PRO3_IP: "192.168.1.103",                // Set to Pro 3EM IP (e.g., "10.0.0.101") or leave empty for simulation
+  PRO3_IP: "192.168.1.100:3100",                // Set to Pro 3EM IP (e.g., "10.0.0.101") or leave empty for simulation
   PRO3_SCRIPT_ID: 1,                       // Script ID on Pro 3 (HTTPServer endpoint is /script/{ID}/heartbeat)
 
   // ⚡ PHASE CONFIGURATION
@@ -32,12 +32,14 @@ let CONFIG = {
 
   // Timings
   SHEDDING_DELAY: 2000,         // 2s delay before shedding (circuit breaker tolerates peaks)
-  RESTORATION_DELAY: 300000,    // 5min (300s) before restoring
+  RESTORATION_DELAY: 10000,    // 5min (300s) before restoring
 
   // Debug mode
   DEBUG: true,
   DEBUG_MQTT: false,                // Enable verbose MQTT logs (separate from DEBUG)
-  DRY_RUN: true,                   // Dry run mode: heartbeat works but relay commands are simulated
+
+  // 🧪 TEST MODE
+  TEST_MODE: true,                 // Enable test mode: exposes HTTP endpoint for status injection
 
   // 📡 MQTT
   MQTT_ENABLED: true,         // Enable MQTT publishing
@@ -276,13 +278,6 @@ function sendCommand(relayIndex, action, onComplete) {
   }
 
   let isOn = (action === "on");
-
-  if (CONFIG.DRY_RUN) {
-    log("DRY_RUN: Would send " + action + " to " + relayIndex);
-    let result = isOn ? "on" : "off";
-    if (onComplete) Timer.set(0, false, function() { onComplete(result); });
-    return;
-  }
 
   let url = buildRpcUrl("Switch.Set", "id=" + relayIndex + "&on=" + isOn);
 
@@ -763,10 +758,6 @@ function handleHeartbeat() {
   });
 }
 
-// ============================================================================
-// STARTUP
-// ============================================================================
-
 function startHeartbeat() {
   if (state.heartbeatTimerId !== null) return;
 
@@ -781,16 +772,124 @@ function stopHeartbeat() {
 
   Timer.clear(state.heartbeatTimerId);
   state.heartbeatTimerId = null;
+  state.heartbeatInProgress = false;
 }
+
+// ============================================================================
+// TEST MODE HTTP ENDPOINT
+// ============================================================================
+
+function setupTestMode() {
+  if (!CONFIG.TEST_MODE) return;
+
+  log("🧪 TEST MODE ENABLED - Registering HTTP endpoint for status injection");
+
+  // Expose HTTP endpoint for test status injection
+  HTTPServer.registerEndpoint("inject-status", function(request, response) {
+    try {
+      let data = JSON.parse(request.body);
+
+      // Build message in same format as Shelly.addStatusHandler
+      let msg = {
+        component: data.component || "em:0",
+        delta: data.delta || data
+      };
+      
+      handleEMStatusUpdate(msg);
+      handleETHStatusUpdate(msg);
+
+      // Send HTTP response immediately
+      response.code = 200;
+      response.body = JSON.stringify({
+        success: true,
+        message: "Status injected",
+        timestamp: Date.now()
+      });
+
+      response.send();
+
+      log("🧪 TEST: Status injected via HTTP endpoint");
+    } catch (error) {
+      response.code = 400;
+      response.body = JSON.stringify({
+        success: false,
+        error: String(error)
+      });
+
+      response.send();
+      logError("TEST: Failed to inject status: " + String(error));
+    }
+  });
+
+  // Expose HTTP endpoint to get current state
+  HTTPServer.registerEndpoint("get-status", function(_request, response) {
+    try {
+      let statusData = {};
+      for (let phaseName in state.phases) {
+        let phaseState = state.phases[phaseName];
+
+        // Add to global status
+        let phaseKey = phaseName.toLowerCase();
+        statusData[phaseKey + "_overload"] = phaseState.overload;
+        statusData[phaseKey + "_shedding"] = !phaseState.active;
+        statusData[phaseKey + "_relay_status"] = phaseState.relay_status;
+        statusData[phaseKey + "_current"] = phaseState.current;
+        statusData[phaseKey + "_last_shedding"] = phaseState.lastShedding || null;
+        statusData[phaseKey + "_shedding_count"] = phaseState.sheddingCount;
+      }
+
+      // Add Pro 3 online status, versions, and global thresholds
+      statusData.pro3_online = state.pro3.online;
+      statusData.pro3_version = state.pro3.version;
+      statusData.pro3em_version = CONFIG.VERSION;
+      statusData.shedding_threshold = CONFIG.SHEDDING_THRESHOLD;
+      statusData.restoration_threshold = CONFIG.RESTORATION_THRESHOLD;
+      
+      response.code = 200;
+      response.body = JSON.stringify({
+        success: true,
+        timestamp: Date.now(),
+        data: statusData
+      });
+
+      response.send();
+      log("🧪 TEST: Status retrieved via HTTP endpoint");
+
+    } catch (error) {
+      response.code = 500;
+      response.body = JSON.stringify({
+        success: false,
+        error: String(error)
+      });
+      response.send();
+      logError("TEST: Failed to get status: " + String(error));
+    }
+  });
+
+  log("🧪 TEST: HTTP endpoints available:");
+  log("  - POST /script/[SCRIPT_ID]/inject-status");
+  log("  - GET  /script/[SCRIPT_ID]/get-status");
+}
+
+// ============================================================================
+// STARTUP
+// ============================================================================
 
 init(function() {
   if(state.ethernetConnected){
     startHeartbeat();
   }
 
-  Shelly.addStatusHandler(function(msg) {
-    handleEMStatusUpdate(msg);
-    handleETHStatusUpdate(msg);
-  });
-  log("Status handler registered for EM:0 updates and network changes");
+  // Register status handler only in production mode
+  // In test mode, status updates come via HTTP endpoint
+  if (!CONFIG.TEST_MODE) {
+    Shelly.addStatusHandler(function(msg) {
+      handleEMStatusUpdate(msg);
+      handleETHStatusUpdate(msg);
+    });
+    log("Status handler registered for EM:0 updates and network changes");
+  } else {
+    setupTestMode();
+    log("🧪 TEST MODE: Status handler disabled (using HTTP endpoint instead)");
+  }
 });
