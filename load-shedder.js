@@ -37,7 +37,6 @@ let CONFIG = {
   // Debug mode
   DEBUG: true,
   DEBUG_MQTT: false,                // Enable verbose MQTT logs (separate from DEBUG)
-  DRY_RUN: false,                   // Dry run mode: heartbeat works but relay commands are simulated
 
   // 🧪 TEST MODE
   TEST_MODE: true,                 // Enable test mode: exposes HTTP endpoint for status injection
@@ -279,13 +278,6 @@ function sendCommand(relayIndex, action, onComplete) {
   }
 
   let isOn = (action === "on");
-
-  if (CONFIG.DRY_RUN) {
-    log("DRY_RUN: Would send " + action + " to " + relayIndex);
-    let result = isOn ? "on" : "off";
-    if (onComplete) Timer.set(0, false, function() { onComplete(result); });
-    return;
-  }
 
   let url = buildRpcUrl("Switch.Set", "id=" + relayIndex + "&on=" + isOn);
 
