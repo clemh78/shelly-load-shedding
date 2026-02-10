@@ -28,16 +28,16 @@ let CONFIG = {
   // Pro3EM detection time: ~15s (see HEARTBEAT_INTERVAL + HTTP_TIMEOUT in pro3em.js)
   // Pro3 emergency trigger: 60s (HEARTBEAT_TIMEOUT below)
   // Safety margin: ~45s - ensures Pro3EM marks Pro3 offline and will re-sync when connection restored
-  HEARTBEAT_CHECK_INTERVAL: 5000,   // Check for missing heartbeat every 5s
-  HEARTBEAT_TIMEOUT: 60000,         // Emergency shutdown if no heartbeat for 60s (6x expected interval from Pro3EM)
+  HEARTBEAT_CHECK_INTERVAL: 5000, // Check for missing heartbeat every 5s
+  HEARTBEAT_TIMEOUT: 60000, // Emergency shutdown if no heartbeat for 60s (6x expected interval from Pro3EM)
   // Debug mode
   DEBUG: true,
 
   // 🧪 TEST MODE
-  TEST_MODE: true,                // Simulates relay operations without touching hardware
+  TEST_MODE: true, // Simulates relay operations without touching hardware
 
   // Relay configuration
-  RELAYS: [0, 1, 2],  // Pro 3 has 3 relays
+  RELAYS: [0, 1, 2] // Pro 3 has 3 relays
 };
 
 // ============================================================================
@@ -47,18 +47,18 @@ let CONFIG = {
 let state = {
   // 📡 Pro 3EM Connection & Heartbeat
   heartbeat: {
-    online: null,                   // Is Pro 3EM online? (null = unknown, true = online, false = offline)
-    lastPing: null,                 // Timestamp of last heartbeat received from Pro3EM (null = never received)
+    online: null, // Is Pro 3EM online? (null = unknown, true = online, false = offline)
+    lastPing: null // Timestamp of last heartbeat received from Pro3EM (null = never received)
   },
 
   // 🛡️ Emergency Shutdown Management
   emergencyShutdown: {
-    active: false,                  // Are we in emergency shutdown mode?
-    activationInProgress: false     // Guard to prevent concurrent emergency shutdowns
+    active: false, // Are we in emergency shutdown mode?
+    activationInProgress: false // Guard to prevent concurrent emergency shutdowns
   },
 
   // 🔌 Relay States
-  relays: {},                       // Relay states (initialized by init())
+  relays: {} // Relay states (initialized by init())
 };
 
 // ============================================================================
@@ -67,16 +67,19 @@ let state = {
 
 function chainOperations(ids, operation, onComplete) {
   if (ids.length === 0) {
-    if (onComplete) Timer.set(0, false, function() { onComplete(); });
+    if (onComplete)
+      Timer.set(0, false, function () {
+        onComplete();
+      });
     return;
   }
 
   let id = ids[0];
   let remaining = ids.slice(1);
 
-  operation(id, function() {
+  operation(id, function () {
     // Use Timer.set for next iteration to prevent deep call stacks
-    Timer.set(0, false, function() {
+    Timer.set(0, false, function () {
       chainOperations(remaining, operation, onComplete);
     });
   });
@@ -100,8 +103,8 @@ function init(callback) {
   // Initialize relay states
   for (let i = 0; i < CONFIG.RELAYS.length; i++) {
     state.relays[CONFIG.RELAYS[i]] = {
-      on: null,                     // Relay state (true = ON, false = OFF, null = unknown)
-      lastUpdate: 0                 // Timestamp of last update
+      on: null, // Relay state (true = ON, false = OFF, null = unknown)
+      lastUpdate: 0 // Timestamp of last update
     };
   }
 
@@ -113,13 +116,16 @@ function init(callback) {
 // ============================================================================
 
 function setState(relayId, action, onComplete) {
-  if (CONFIG.TEST_MODE){
-    if (onComplete) Timer.set(0, false, function() { onComplete(action === "on"); });
+  if (CONFIG.TEST_MODE) {
+    if (onComplete)
+      Timer.set(0, false, function () {
+        onComplete(action === "on");
+      });
     return;
   }
 
-  let isOn = (action === "on");
-  Shelly.call("Switch.Set", {id: relayId, on: isOn}, function(result, error_code, error_message) {
+  let isOn = action === "on";
+  Shelly.call("Switch.Set", { id: relayId, on: isOn }, function (result, error_code, error_message) {
     if (error_code !== 0 || !result) {
       let errorReason = error_code !== 0 ? error_message : "Switch.Set " + (result ? result.code : "no response");
       logError("Relay set " + relayId + ": " + errorReason);
@@ -132,13 +138,16 @@ function setState(relayId, action, onComplete) {
   });
 }
 
-function getRelayStatus(relayId, onComplete){
-  if (CONFIG.TEST_MODE){
-    if (onComplete) Timer.set(0, false, function() { onComplete(true); });
+function getRelayStatus(relayId, onComplete) {
+  if (CONFIG.TEST_MODE) {
+    if (onComplete)
+      Timer.set(0, false, function () {
+        onComplete(true);
+      });
     return;
   }
 
-  Shelly.call("Switch.GetStatus", {id: relayId}, function(result, error_code, error_message) {
+  Shelly.call("Switch.GetStatus", { id: relayId }, function (result, error_code, error_message) {
     if (error_code !== 0 || !result || result.output === undefined) {
       let errorReason = error_code !== 0 ? error_message : "Switch.GetStatus " + (result ? result.code : "no response");
       logError("Relay get status " + relayId + ": " + errorReason);
@@ -155,8 +164,8 @@ function getRelayStatus(relayId, onComplete){
 // ============================================================================
 
 function cutRelay(relayId, onComplete) {
-  setState(relayId, "off", function(result){
-    if(result !== null){
+  setState(relayId, "off", function (result) {
+    if (result !== null) {
       state.relays[relayId].on = result;
       state.relays[relayId].lastUpdate = Date.now();
       log("✂️ Relay " + relayId + " cut");
@@ -166,8 +175,8 @@ function cutRelay(relayId, onComplete) {
 }
 
 function fetchRelayState(relayId, onComplete) {
-  getRelayStatus(relayId, function(result){
-    if(result !== null){
+  getRelayStatus(relayId, function (result) {
+    if (result !== null) {
       state.relays[relayId].on = result;
       state.relays[relayId].lastUpdate = Date.now();
       log("Relay " + relayId + " initial state: " + (result ? "ON" : "OFF"));
@@ -179,7 +188,7 @@ function fetchRelayState(relayId, onComplete) {
 function fetchRelayStates(onComplete) {
   log("Fetching initial relay states...");
 
-  chainOperations(CONFIG.RELAYS, fetchRelayState, function() {
+  chainOperations(CONFIG.RELAYS, fetchRelayState, function () {
     log("Initial relay states fetched");
     if (onComplete) onComplete();
   });
@@ -198,7 +207,7 @@ function activateEmergencyShutdown() {
   state.emergencyShutdown.activationInProgress = true;
   logError("🚨 EMERGENCY SHUTDOWN: Pro 3EM heartbeat lost - cutting all relays");
 
-  chainOperations(CONFIG.RELAYS, cutRelay, function() {
+  chainOperations(CONFIG.RELAYS, cutRelay, function () {
     state.emergencyShutdown.activationInProgress = false;
 
     // Heartbeat resumed while relays were being cut — don't enter emergency mode
@@ -226,8 +235,8 @@ function disableEmergencyShutdown() {
   state.emergencyShutdown.active = false;
 }
 
-function heartbeatNowDown(){
-  if(!state.heartbeat.online) return;
+function heartbeatNowDown() {
+  if (!state.heartbeat.online) return;
 
   log("💔 Pro 3EM is now OFFLINE");
 
@@ -236,8 +245,8 @@ function heartbeatNowDown(){
   state.heartbeat.online = false;
 }
 
-function heartbeatNowUp(){
-  if(state.heartbeat.online) return;
+function heartbeatNowUp() {
+  if (state.heartbeat.online) return;
 
   log("✅ Pro 3EM is now ONLINE");
 
@@ -251,15 +260,14 @@ function heartbeatNowUp(){
 // ============================================================================
 
 function computeMonitorDecision(online, lastPing) {
-
-  if(lastPing === null){
+  if (lastPing === null) {
     return "waiting_data";
   }
 
   let elapsed = Date.now() - lastPing;
   if (elapsed > CONFIG.HEARTBEAT_TIMEOUT && online === true) {
     return "down";
-  }else if(elapsed <= CONFIG.HEARTBEAT_TIMEOUT && online !== true){
+  } else if (elapsed <= CONFIG.HEARTBEAT_TIMEOUT && online !== true) {
     return "up";
   }
 
@@ -271,19 +279,19 @@ function computeMonitorDecision(online, lastPing) {
 // ============================================================================
 
 function handleHeartbeatMonitor() {
-  let monitorDecision = computeMonitorDecision(state.heartbeat.online, state.heartbeat.lastPing)
+  let monitorDecision = computeMonitorDecision(state.heartbeat.online, state.heartbeat.lastPing);
 
-  if (monitorDecision && monitorDecision === "waiting_data"){
+  if (monitorDecision && monitorDecision === "waiting_data") {
     log("Waiting for first heartbeat from Pro3EM...");
-  }else if (monitorDecision && monitorDecision === "down"){
+  } else if (monitorDecision && monitorDecision === "down") {
     heartbeatNowDown();
-  }else if(monitorDecision && monitorDecision === "up"){
+  } else if (monitorDecision && monitorDecision === "up") {
     heartbeatNowUp();
-  }else{
+  } else {
     let elapsed = Date.now() - state.heartbeat.lastPing;
-    if(state.heartbeat.online){
+    if (state.heartbeat.online) {
       log("Heartbeat OK (last received " + (elapsed / 1000).toFixed(1) + "s ago)");
-    }else{
+    } else {
       log("Heartbeat KO (last received " + (elapsed / 1000).toFixed(1) + "s ago)");
     }
   }
@@ -340,14 +348,27 @@ function handleStatusUpdate(msg) {
 
   // Log state change and publish immediately
   if (oldState !== newState) {
-    log("Relay " + relayId + " state changed: " + (oldState === null ? "unknown" : (oldState ? "ON" : "OFF")) + " -> " + (newState ? "ON" : "OFF"));
+    log(
+      "Relay " +
+        relayId +
+        " state changed: " +
+        (oldState === null ? "unknown" : oldState ? "ON" : "OFF") +
+        " -> " +
+        (newState ? "ON" : "OFF")
+    );
   }
 }
 
-function startHeartbeatMonitor(){
+function startHeartbeatMonitor() {
   handleHeartbeatMonitor();
   Timer.set(CONFIG.HEARTBEAT_CHECK_INTERVAL, true, handleHeartbeatMonitor);
-  log("Heartbeat monitoring started (check every " + (CONFIG.HEARTBEAT_CHECK_INTERVAL/1000) + "s, timeout: " + (CONFIG.HEARTBEAT_TIMEOUT/1000) + "s)");
+  log(
+    "Heartbeat monitoring started (check every " +
+      CONFIG.HEARTBEAT_CHECK_INTERVAL / 1000 +
+      "s, timeout: " +
+      CONFIG.HEARTBEAT_TIMEOUT / 1000 +
+      "s)"
+  );
 }
 
 // ============================================================================
@@ -359,7 +380,7 @@ function setupTestMode() {
 
   log("🧪 TEST MODE ENABLED - Registering HTTP endpoint for status injection");
 
-  HTTPServer.registerEndpoint("inject-status", function(request, response) {
+  HTTPServer.registerEndpoint("inject-status", function (request, response) {
     try {
       let data = JSON.parse(request.body);
 
@@ -391,7 +412,7 @@ function setupTestMode() {
     }
   });
 
-  HTTPServer.registerEndpoint("get-status", function(_request, response) {
+  HTTPServer.registerEndpoint("get-status", function (_request, response) {
     let relayStates = {};
     for (let i = 0; i < CONFIG.RELAYS.length; i++) {
       let relayId = CONFIG.RELAYS[i];
@@ -414,7 +435,7 @@ function setupTestMode() {
     response.send();
   });
 
-  HTTPServer.registerEndpoint("reset-state", function(_request, response) {
+  HTTPServer.registerEndpoint("reset-state", function (_request, response) {
     state.heartbeat.online = null;
     state.heartbeat.lastPing = null;
     state.emergencyShutdown.active = false;
@@ -442,14 +463,14 @@ function setupTestMode() {
 // STARTUP
 // ============================================================================
 
-init(function(){
+init(function () {
   startHeartbeatMonitor();
 
   HTTPServer.registerEndpoint("heartbeat", handleHeartbeatRequest);
 
   if (!CONFIG.TEST_MODE) {
     Shelly.addStatusHandler(handleStatusUpdate);
-  }else{
+  } else {
     setupTestMode();
     log("🧪 TEST MODE: Status handler disabled (using HTTP endpoint instead)");
   }
