@@ -11,6 +11,7 @@ const SHELLY_SCRIPT_ID = process.env.SHELLY_SCRIPT_ID || "2";
 const SHELLY_BASE_URL = `http://${SHELLY_IP}`;
 const INJECT_ENDPOINT = `${SHELLY_BASE_URL}/script/${SHELLY_SCRIPT_ID}/inject-status`;
 const GET_STATUS_ENDPOINT = `${SHELLY_BASE_URL}/script/${SHELLY_SCRIPT_ID}/get-status`;
+const RESET_STATE_ENDPOINT = `${SHELLY_BASE_URL}/script/${SHELLY_SCRIPT_ID}/reset-state`;
 const MOCK_SERVER_URL = process.env.MOCK_SERVER_URL || "http://192.168.1.100:3100";
 
 // Helper functions
@@ -180,20 +181,18 @@ function check(condition, message) {
  */
 async function resetState() {
   console.log('\n🔄 Resetting state...');
-  // Ensure mock server is online with all relays ON
+  // Reset Shelly internal state via endpoint
+  try {
+    await axios.post(RESET_STATE_ENDPOINT);
+  } catch (error) {
+    console.error(`   ❌ Failed to reset Shelly state: ${error.message}`);
+    throw error;
+  }
+  // Reset mock server to match
   await setMockOnline(true);
   await setMockRelay(0, true);
   await setMockRelay(1, true);
   await setMockRelay(2, true);
-  // Ensure ethernet is connected
-  await injectETH(true);
-  // Inject normal currents and wait for any pending restoration
-  await injectStatus(10, 10, 10);
-  await sleep(1000);
-  // Re-inject to trigger restoration if any phase was shed
-  await injectStatus(10, 10, 10);
-  await sleep(12000); // Wait for RESTORATION_DELAY (10s) + margin
-  await injectStatus(10, 10, 10);
   await sleep(1000);
   console.log('   🔄 State reset complete');
 }

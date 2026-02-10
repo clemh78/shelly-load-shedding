@@ -867,9 +867,37 @@ function setupTestMode() {
     }
   });
 
+  HTTPServer.registerEndpoint("reset-state", function(_request, response) {
+    // Reset all phase states
+    for (let phaseName in state.phases) {
+      state.phases[phaseName].active = true;
+      state.phases[phaseName].relay_status = "on";
+      state.phases[phaseName].current = 0;
+      state.phases[phaseName].overload = false;
+      state.phases[phaseName].overloadStartTime = null;
+      state.phases[phaseName].lastShedding = 0;
+      state.phases[phaseName].sheddingCount = 0;
+    }
+
+    // Reset Pro3 connection state
+    state.pro3.online = true;
+    state.pro3.consecutiveFailures = 0;
+
+    // Reset guards
+    state.heartbeatInProgress = false;
+    state.ethernetConnected = true;
+
+    response.code = 200;
+    response.body = JSON.stringify({ success: true, message: "State reset" });
+    response.send();
+
+    log("🧪 TEST: State reset to initial values");
+  });
+
   log("🧪 TEST: HTTP endpoints available:");
   log("  - POST /script/[SCRIPT_ID]/inject-status");
   log("  - GET  /script/[SCRIPT_ID]/get-status");
+  log("  - POST /script/[SCRIPT_ID]/reset-state");
 }
 
 // ============================================================================
