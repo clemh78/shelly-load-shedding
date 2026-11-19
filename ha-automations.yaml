@@ -1,129 +1,176 @@
-# ===========================================================================
-# 1. Notification de délestage / restauration
-# ===========================================================================
 - id: load_shedding_notifications
-  alias: "Délestage - Notification"
-  trigger:
-    - platform: state
-      entity_id:
-        - binary_sensor.load_shedder_l1_shedding
-        - binary_sensor.load_shedder_l2_shedding
-        - binary_sensor.load_shedder_l3_shedding
-      from: "off"
-      to: "on"
-      id: shedding
-    - platform: state
-      entity_id:
-        - binary_sensor.load_shedder_l1_shedding
-        - binary_sensor.load_shedder_l2_shedding
-        - binary_sensor.load_shedder_l3_shedding
-      from: "on"
-      to: "off"
-      id: restoration
-  action:
-    - service: notify.mobile_app_iphone_de_clement
-      data:
-        title: >-
-          {% if trigger.id == 'shedding' %}
-          ⚠️ Délestage - {{ trigger.to_state.name }}
-          {% else %}
-          ✅ Restauration - {{ trigger.to_state.name }}
-          {% endif %}
-        message: >-
-          {% set base = trigger.to_state.object_id | replace('_shedding', '') %}
-          Courant: {{ states('sensor.' ~ base ~ '_current') }} A
-          Relais: {{ states('binary_sensor.' ~ base ~ '_relay') }}
-          Délestages: {{ states('sensor.' ~ base ~ '_shedding_count') }}
-        data:
-          priority: high
-          ttl: 0
-          color: >-
-            {{ 'red' if trigger.id == 'shedding' else 'green' }}
+  alias: Délestage - Activation
+  description: ''
+  triggers:
+  - entity_id:
+    - binary_sensor.load_shedding_14335cc56020_l1_shedding
+    - binary_sensor.load_shedding_dev_l1_shedding
+    id: l1
+    trigger: state
+    from:
+    - 'off'
+    to:
+    - 'on'
+  - entity_id:
+    - binary_sensor.load_shedding_14335cc56020_l2_shedding
+    - binary_sensor.load_shedding_dev_l2_shedding
+    id: l2
+    trigger: state
+    from:
+    - 'off'
+    to:
+    - 'on'
+  - entity_id:
+    - binary_sensor.load_shedding_14335cc56020_l3_shedding
+    - binary_sensor.load_shedding_dev_l3_shedding
+    id: l3
+    trigger: state
+    from:
+    - 'off'
+    to:
+    - 'on'
+  actions:
+  - data:
+      title: ⚠️ Délestage ({{ trigger.id.upper() }})
+      message: '{% set base = trigger.to_state.object_id | regex_replace(''_shedding$'',
+        '''') %} {% set current = states(''sensor.'' ~ base ~ ''_current'') %}
+
+        La phase {{ trigger.id.upper() }} a été délestée avec {{ current if current
+        not in [''unknown'', ''unavailable''] else ''N/A'' }} A.'
+    action: notify.mobile_app_iphone_de_clement
+    enabled: true
+  - action: persistent_notification.create
+    metadata: {}
+    data:
+      message: '{% set base = trigger.to_state.object_id | regex_replace(''_shedding$'',
+        '''') %} {% set current = states(''sensor.'' ~ base ~ ''_current'') %}
+
+        La phase {{ trigger.id.upper() }} a été délestée avec {{ current if current
+        not in [''unknown'', ''unavailable''] else ''N/A'' }} A.'
+      title: ⚠️ Délestage ({{ trigger.id.upper() }})
   mode: queued
   max: 10
-
-# ===========================================================================
-# 2. Alerte Pro 3 hors ligne
-# ===========================================================================
-- id: load_shedding_pro3_offline
-  alias: "Délestage - Pro 3 hors ligne"
-  trigger:
-    - platform: state
-      entity_id: binary_sensor.load_shedder_pro3_online
-      to: "off"
-      for:
-        seconds: 30
-  action:
-    - service: notify.mobile_app_iphone_de_clement
-      data:
-        title: "🔌 Pro 3 hors ligne"
-        message: >
-          Le Shelly Pro 3 ne répond plus depuis 30s.
-          Les relais sont en état inconnu.
-        data:
-          priority: high
-          ttl: 0
-          color: red
-  mode: single
-
-# ===========================================================================
-# 3. Alerte Pro 3 de retour en ligne
-# ===========================================================================
-- id: load_shedding_pro3_online
-  alias: "Délestage - Pro 3 en ligne"
-  trigger:
-    - platform: state
-      entity_id: binary_sensor.load_shedder_pro3_online
-      from: "off"
-      to: "on"
-  action:
-    - service: notify.mobile_app_iphone_de_clement
-      data:
-        title: "✅ Pro 3 en ligne"
-        message: "Le Shelly Pro 3 est de retour. Synchronisation des relais en cours."
-        data:
-          color: green
-  mode: single
-
-# ===========================================================================
-# 4. Alerte Délesteur (Pro 3EM) hors ligne
-# ===========================================================================
 - id: load_shedding_pro3em_offline
-  alias: "Délestage - Délesteur hors ligne"
-  trigger:
-    - platform: state
-      entity_id: binary_sensor.load_shedder_pro3em_online
-      to: "off"
-      for:
-        seconds: 30
-  action:
-    - service: notify.mobile_app_iphone_de_clement
+  alias: Délestage - Délesteur hors ligne
+  triggers:
+  - entity_id:
+    - binary_sensor.load_shedding_14335cc56020_pro3em_online
+    - binary_sensor.load_shedding_dev_pro3em_online
+    to:
+    - 'off'
+    for:
+      seconds: 30
+    trigger: state
+    id: pro3em
+  - trigger: state
+    entity_id:
+    - binary_sensor.load_shedding_14335cc56020_pro3_online
+    - binary_sensor.load_shedding_dev_pro3_online
+    id: pro3
+    to:
+    - 'off'
+    for:
+      hours: 0
+      minutes: 0
+      seconds: 30
+  actions:
+  - data:
+      title: "\U0001F6A8 Délesteur hors ligne"
+      message: '{% if trigger.id == ''pro3em'' %} Le délesteur ne répond {% else %}
+        Les contacteurs ne répondent {% endif %} plus depuis 30s. Le système de délestage
+        est inactif.'
       data:
-        title: "🚨 Délesteur hors ligne"
-        message: >
-          Le Shelly Pro 3EM (délesteur) ne répond plus depuis 30s.
-          Le système de délestage est inactif.
-        data:
-          priority: high
-          ttl: 0
-          color: red
+        priority: high
+        ttl: 0
+        color: red
+    action: notify.mobile_app_iphone_de_clement
+  - action: persistent_notification.create
+    metadata: {}
+    data:
+      message: '{% if trigger.id == ''pro3em'' %} Le délesteur ne répond {% else %}
+        Les contacteurs ne répondent {% endif %} plus depuis 30s. Le système de délestage
+        est inactif.'
+      title: "\U0001F6A8 Délesteur hors ligne"
   mode: single
-
-# ===========================================================================
-# 5. Alerte Délesteur (Pro 3EM) de retour en ligne
-# ===========================================================================
 - id: load_shedding_pro3em_online
-  alias: "Délestage - Délesteur en ligne"
-  trigger:
-    - platform: state
-      entity_id: binary_sensor.load_shedder_pro3em_online
-      from: "off"
-      to: "on"
-  action:
-    - service: notify.mobile_app_iphone_de_clement
+  alias: Délestage - Délesteur en ligne
+  triggers:
+  - entity_id:
+    - binary_sensor.load_shedding_14335cc56020_pro3em_online
+    - binary_sensor.load_shedding_dev_pro3em_online
+    from:
+    - 'off'
+    to:
+    - 'on'
+    trigger: state
+    id: pro3em
+  - trigger: state
+    entity_id:
+    - binary_sensor.load_shedding_14335cc56020_pro3_online
+    - binary_sensor.load_shedding_dev_pro3_online
+    from:
+    - 'off'
+    to:
+    - 'on'
+    id: pro3
+  actions:
+  - data:
+      title: ✅ Délesteur en ligne
+      message: '{% if trigger.id == ''pro3em'' %} Le délesteur est {% else %} Les
+        contacteurs sont {% endif %} de retour. Le système de délestage est actif.'
       data:
-        title: "✅ Délesteur en ligne"
-        message: "Le Shelly Pro 3EM est de retour. Le système de délestage est actif."
-        data:
-          color: green
+        color: green
+    action: notify.mobile_app_iphone_de_clement
+  - action: persistent_notification.create
+    metadata: {}
+    data:
+      message: '{% if trigger.id == ''pro3em'' %} Le délesteur est {% else %} Les
+        contacteurs sont {% endif %} de retour. Le système de délestage est actif.'
+      title: ✅ Délesteur en ligne
   mode: single
+- id: '1771088015122'
+  alias: Delestage - Restauration
+  description: ''
+  triggers:
+  - entity_id:
+    - binary_sensor.load_shedding_14335cc56020_l1_shedding
+    - binary_sensor.load_shedding_dev_l1_shedding
+    from:
+    - 'on'
+    to:
+    - 'off'
+    trigger: state
+    id: l1
+  - entity_id:
+    - binary_sensor.load_shedding_14335cc56020_l2_shedding
+    - binary_sensor.load_shedding_dev_l2_shedding
+    from:
+    - 'on'
+    to:
+    - 'off'
+    trigger: state
+    id: l2
+  - entity_id:
+    - binary_sensor.load_shedding_14335cc56020_l3_shedding
+    - binary_sensor.load_shedding_dev_l3_shedding
+    from:
+    - 'on'
+    to:
+    - 'off'
+    trigger: state
+    id: l3
+  conditions: []
+  actions:
+  - data:
+      title: ✅ Restauration ({{ trigger.id.upper() }})
+      message: La phase {{ trigger.id.upper() }} a été restaurée.
+    action: notify.mobile_app_iphone_de_clement
+    enabled: true
+  - action: persistent_notification.create
+    metadata: {}
+    data:
+      message: La phase {{ trigger.id.upper() }} a été restaurée.
+      title: ✅ Restauration ({{ trigger.id.upper() }})
+  mode: queued
+  max: 10
+  

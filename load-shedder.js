@@ -32,14 +32,14 @@ let CONFIG = {
 
   // Timings
   SHEDDING_DELAY: 2000, // 2s delay before shedding (circuit breaker tolerates peaks)
-  RESTORATION_DELAY: 10000, // 5min (300s) before restoring
+  RESTORATION_DELAY: 10000, // 10s before restoring
 
   // Debug mode
   DEBUG: true,
   DEBUG_MQTT: false, // Enable verbose MQTT logs (separate from DEBUG)
 
   // 🧪 TEST MODE
-  TEST_MODE: true, // Enable test mode: exposes HTTP endpoint for status injection
+  TEST_MODE: false, // Enable test mode: exposes HTTP endpoint for status injection
 
   // 📡 MQTT
   MQTT_ENABLED: true, // Enable MQTT publishing
