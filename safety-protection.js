@@ -34,7 +34,7 @@ let CONFIG = {
   DEBUG: true,
 
   // 🧪 TEST MODE
-  TEST_MODE: true, // Simulates relay operations without touching hardware
+  TEST_MODE: false, // Simulates relay operations without touching hardware
 
   // Relay configuration
   RELAYS: [0, 1, 2] // Pro 3 has 3 relays
